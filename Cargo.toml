@@ -1,0 +1,32 @@
+[package]
+name = "scoped-heed"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+heed = "0.20"
+
+[[example]]
+name = "scoped_demo"
+
+[[example]]
+name = "basic_usage"
+
+[[example]]
+name = "multi_tenant"
+
+[[example]]
+name = "iteration_patterns"
+
+[[example]]
+name = "legacy_compatibility"
+
+[[example]]
+name = "error_handling"
+
+[dev-dependencies]
+tempfile = "3"
+# heed is already a normal dependency, but if tests needed specific features or versions,
+# it could be listed here too. For now, the main dependency is sufficient.
