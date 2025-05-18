@@ -55,7 +55,7 @@
 
 use heed::Database as HeedDatabase;
 use heed::types::{Bytes, SerdeBincode};
-use heed::{Env, RoTxn as HeedRoTxn, RwTxn as HeedRwTxn, RwTxn};
+use heed::{Env, RoTxn, RwTxn};
 use heed::{BytesEncode, BytesDecode};
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -251,7 +251,7 @@ where
     /// Insert a key-value pair into the database.
     pub fn put(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &K,
         value: &V,
@@ -282,7 +282,7 @@ where
     /// Get a value from the database.
     pub fn get<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         key: &K,
     ) -> Result<Option<V>, ScopedDbError> {
@@ -312,7 +312,7 @@ where
     /// Delete a key-value pair from the database.
     pub fn delete(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &K,
     ) -> Result<bool, ScopedDbError> {
@@ -341,7 +341,7 @@ where
     /// Clear all entries within a specific scope or the default database.
     pub fn clear(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
     ) -> Result<(), ScopedDbError> {
         match scope_name {
@@ -378,7 +378,7 @@ where
     /// Iterate over entries in a specific scope or the default database.
     pub fn iter<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<(K, V), ScopedDbError>> + 'txn>, ScopedDbError> {
         match scope_name {
@@ -413,7 +413,7 @@ where
     /// Iterate over a range of entries in a specific scope or the default database.
     pub fn range<'txn, R>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         range: &'txn R,
     ) -> Result<Box<dyn Iterator<Item = Result<(K, V), ScopedDbError>> + 'txn>, ScopedDbError>
@@ -787,7 +787,7 @@ where
     /// Insert a key-value pair into the database.
     pub fn put(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &[u8],
         value: &V,
@@ -813,7 +813,7 @@ where
     /// Get a value from the database.
     pub fn get<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         key: &[u8],
     ) -> Result<Option<V>, ScopedDbError> {
@@ -838,7 +838,7 @@ where
     /// Delete a key-value pair from the database.
     pub fn delete(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &[u8],
     ) -> Result<bool, ScopedDbError> {
@@ -863,7 +863,7 @@ where
     /// Clear all entries within a specific scope or the default database.
     pub fn clear(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
     ) -> Result<(), ScopedDbError> {
         match scope_name {
@@ -901,7 +901,7 @@ where
     /// Iterate over entries in a specific scope or the default database.
     pub fn iter<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], V), ScopedDbError>> + 'txn>, ScopedDbError> {
         match scope_name {
@@ -936,7 +936,7 @@ where
     /// Iterate over a range of entries in a specific scope or the default database.
     pub fn range<'txn, R>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         range: &'txn R,
     ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], V), ScopedDbError>> + 'txn>, ScopedDbError>
@@ -1049,7 +1049,7 @@ impl ScopedBytesDatabase {
 
     pub fn put(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &[u8],
         value: &[u8],
@@ -1074,7 +1074,7 @@ impl ScopedBytesDatabase {
 
     pub fn get<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         key: &[u8],
     ) -> Result<Option<&'txn [u8]>, ScopedDbError> {
@@ -1099,7 +1099,7 @@ impl ScopedBytesDatabase {
     /// Delete a key-value pair from the database.
     pub fn delete(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
         key: &[u8],
     ) -> Result<bool, ScopedDbError> {
@@ -1124,7 +1124,7 @@ impl ScopedBytesDatabase {
     /// Clear all entries within a specific scope or the default database.
     pub fn clear(
         &self,
-        txn: &mut HeedRwTxn<'_>,
+        txn: &mut RwTxn<'_>,
         scope_name: Option<&str>,
     ) -> Result<(), ScopedDbError> {
         match scope_name {
@@ -1162,7 +1162,7 @@ impl ScopedBytesDatabase {
     /// Iterate over entries in a specific scope or the default database.
     pub fn iter<'txn>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
     ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], &'txn [u8]), ScopedDbError>> + 'txn>, ScopedDbError> {
         match scope_name {
@@ -1197,7 +1197,7 @@ impl ScopedBytesDatabase {
     /// Iterate over a range of entries in a specific scope or the default database.
     pub fn range<'txn, R>(
         &self,
-        txn: &'txn HeedRoTxn,
+        txn: &'txn RoTxn<'txn>,
         scope_name: Option<&str>,
         range: &'txn R,
     ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], &'txn [u8]), ScopedDbError>> + 'txn>, ScopedDbError>
