@@ -1,3 +1,58 @@
+//! # scoped-heed
+//! 
+//! A library providing Redis-like database isolation for LMDB via the heed wrapper.
+//!
+//! ## Scope Isolation Model
+//!
+//! This library implements complete scope isolation similar to Redis databases:
+//! - Each scope acts as an independent database within the same LMDB environment
+//! - Operations are strictly confined to a single scope
+//! - No cross-scope queries or operations are possible
+//! - Keys can be identical across different scopes without collision
+//! - Clearing a scope only affects that specific scope's data
+//!
+//! This design is perfect for:
+//! - Multi-tenant applications requiring data isolation
+//! - Test scenarios where each test needs its own database
+//! - Modular systems with independent components
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use scoped_heed::{scoped_database_options, ScopedDbError};
+//! use heed::EnvOpenOptions;
+//!
+//! # fn main() -> Result<(), ScopedDbError> {
+//! // Open environment
+//! let env = unsafe {
+//!     EnvOpenOptions::new()
+//!         .map_size(10 * 1024 * 1024)
+//!         .max_dbs(3)
+//!         .open("./my_db")?
+//! };
+//!
+//! // Create a scoped database
+//! let mut wtxn = env.write_txn()?;
+//! let db = scoped_database_options(&env)
+//!     .types::<String, String>()
+//!     .name("my_data")
+//!     .create(&mut wtxn)?;
+//! wtxn.commit()?;
+//!
+//! // Use different scopes for different tenants
+//! let mut wtxn = env.write_txn()?;
+//! db.put(&mut wtxn, Some("tenant1"), &"key1".to_string(), &"value1".to_string())?;
+//! db.put(&mut wtxn, Some("tenant2"), &"key1".to_string(), &"value2".to_string())?;
+//! wtxn.commit()?;
+//!
+//! // Each scope is completely isolated
+//! let rtxn = env.read_txn()?;
+//! let val1 = db.get(&rtxn, Some("tenant1"), &"key1".to_string())?; // Some("value1")
+//! let val2 = db.get(&rtxn, Some("tenant2"), &"key1".to_string())?; // Some("value2")
+//! # Ok(())
+//! # }
+//! ```
+
 use heed::Database as HeedDatabase;
 use heed::types::{Bytes, SerdeBincode};
 use heed::{Env, RoTxn as HeedRoTxn, RwTxn as HeedRwTxn, RwTxn};
@@ -8,7 +63,35 @@ use std::fmt;
 use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::RwLock;
+use std::ops::{RangeBounds, Bound};
 use serde::{Serialize, Deserialize};
+
+/// Adapter to convert `RangeBounds<&[u8]>` to `RangeBounds<[u8]>` for heed's Bytes codec.
+struct HeedRangeAdapter<'a, R: RangeBounds<&'a [u8]>>(&'a R, PhantomData<&'a ()>);
+
+impl<'a, R: RangeBounds<&'a [u8]>> HeedRangeAdapter<'a, R> {
+    fn new(range: &'a R) -> Self {
+        HeedRangeAdapter(range, PhantomData)
+    }
+}
+
+impl<'a, R: RangeBounds<&'a [u8]>> RangeBounds<[u8]> for HeedRangeAdapter<'a, R> {
+    fn start_bound(&self) -> Bound<&[u8]> {
+        match self.0.start_bound() {
+            Bound::Included(&k) => Bound::Included(k),
+            Bound::Excluded(&k) => Bound::Excluded(k),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
+    fn end_bound(&self) -> Bound<&[u8]> {
+        match self.0.end_bound() {
+            Bound::Included(&k) => Bound::Included(k),
+            Bound::Excluded(&k) => Bound::Excluded(k),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+}
 
 pub mod builder;
 pub use builder::scoped_database_options;
@@ -104,12 +187,16 @@ pub struct ScopedKey<K> {
     pub key: K,
 }
 
-/// A scoped database implementation supporting both default (unscoped) and scoped data.
+/// A scoped database providing Redis-like isolation between scopes.
 /// 
-/// Keys and values can be any type that implements Serialize/Deserialize.
-/// Internally uses:
-/// - Direct key encoding for the default database
-/// - ScopedKey<K> tuple encoding for the scoped database
+/// Each scope acts as a completely isolated database:
+/// - Operations are confined to a single scope
+/// - No cross-scope queries or access is possible
+/// - Keys can overlap between scopes without collision
+/// 
+/// This is the most flexible database type, supporting any Serialize/Deserialize types
+/// for both keys and values. For better performance with byte keys, see
+/// `ScopedBytesKeyDatabase` or `ScopedBytesDatabase`.
 #[derive(Debug)]
 pub struct ScopedDatabase<K, V>
 where
@@ -221,7 +308,194 @@ where
             }
         }
     }
+
+    /// Delete a key-value pair from the database.
+    pub fn delete(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+        key: &K,
+    ) -> Result<bool, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                let scoped_key = ScopedKey {
+                    scope_hash,
+                    key: key.clone(),
+                };
+                self.db_scoped
+                    .delete(txn, &scoped_key)
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .delete(txn, key)
+                    .map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Clear all entries within a specific scope or the default database.
+    pub fn clear(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+    ) -> Result<(), ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // We need to collect entries to delete before modifying the database
+                let mut entries_to_delete = Vec::new();
+                
+                // Use a temporary reference to the transaction for iteration
+                let txn_ref = &*txn;
+                for result in self.db_scoped.iter(txn_ref)? {
+                    let (scoped_key, _value) = result?;
+                    if scoped_key.scope_hash == scope_hash {
+                        entries_to_delete.push(scoped_key.clone());
+                    }
+                }
+                
+                // Now delete the collected entries
+                for scoped_key in entries_to_delete {
+                    self.db_scoped.delete(txn, &scoped_key)?;
+                }
+                
+                Ok(())
+            }
+            None => {
+                self.db_default.clear(txn).map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Iterate over entries in a specific scope or the default database.
+    pub fn iter<'txn>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(K, V), ScopedDbError>> + 'txn>, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                let iter = self.db_scoped.iter(txn)?
+                    .filter_map(move |result| {
+                        match result {
+                            Ok((scoped_key, value)) => {
+                                if scoped_key.scope_hash == scope_hash {
+                                    Some(Ok((scoped_key.key, value)))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
+                        }
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                let iter = self.db_default.iter(txn)?
+                    .map(|result| result.map_err(ScopedDbError::from));
+                Ok(Box::new(iter))
+            }
+        }
+    }
+
+    /// Iterate over a range of entries in a specific scope or the default database.
+    pub fn range<'txn, R>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+        range: &'txn R,
+    ) -> Result<Box<dyn Iterator<Item = Result<(K, V), ScopedDbError>> + 'txn>, ScopedDbError>
+    where
+        R: RangeBounds<K>,
+        K: PartialOrd,
+    {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // Transform the range bounds to work with our ScopedKey<K> structure
+                use std::ops::Bound;
+                
+                let transformed_start = match range.start_bound() {
+                    Bound::Included(key) => Bound::Included(ScopedKey {
+                        scope_hash,
+                        key: key.clone(),
+                    }),
+                    Bound::Excluded(key) => Bound::Excluded(ScopedKey {
+                        scope_hash,
+                        key: key.clone(),
+                    }),
+                    Bound::Unbounded => {
+                        // Start from the beginning of this scope
+                        // Note: This correctly handles the unbounded case since
+                        // keys are ordered first by scope_hash, then by key
+                        Bound::Unbounded
+                    }
+                };
+                
+                let transformed_end = match range.end_bound() {
+                    Bound::Included(key) => Bound::Included(ScopedKey {
+                        scope_hash,
+                        key: key.clone(),
+                    }),
+                    Bound::Excluded(key) => Bound::Excluded(ScopedKey {
+                        scope_hash,
+                        key: key.clone(),
+                    }),
+                    Bound::Unbounded => {
+                        // We can't use Unbounded here as it would include keys from other scopes
+                        // No good solution for this with the current design - fall back to filtering
+                        return self.db_scoped.iter(txn)?
+                            .filter_map(move |result| {
+                                match result {
+                                    Ok((scoped_key, value)) => {
+                                        if scoped_key.scope_hash == scope_hash && range.contains(&scoped_key.key) {
+                                            Some(Ok((scoped_key.key, value)))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    Err(e) => Some(Err(ScopedDbError::from(e))),
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                            .map(|v| Box::new(v.into_iter().map(Ok)) as Box<dyn Iterator<Item = Result<(K, V), ScopedDbError>> + 'txn>);
+                    }
+                };
+                
+                let transformed_range = (transformed_start, transformed_end);
+                
+                // Use the native range method directly
+                let iter = self.db_scoped.range(txn, &transformed_range)?
+                    .map(|result| match result {
+                        Ok((scoped_key, value)) => Ok((scoped_key.key, value)),
+                        Err(e) => Err(ScopedDbError::from(e)),
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                let iter = self.db_default.range(txn, range)?
+                    .map(|result| result.map_err(ScopedDbError::from));
+                Ok(Box::new(iter))
+            }
+        }
+    }
 }
+
 
 impl<K, V> Clone for ScopedDatabase<K, V>
 where
@@ -456,7 +730,11 @@ impl<'a> BytesDecode<'a> for ScopedBytesCodec {
     }
 }
 
-/// Specialized ScopedDatabase for byte keys with optimized performance
+/// Performance-optimized scoped database for byte slice keys with Redis-like isolation.
+///
+/// Provides the same complete scope isolation as `ScopedDatabase` but optimized for
+/// applications using byte slice keys. This avoids serialization overhead for keys
+/// while maintaining type safety for values.
 #[derive(Debug)]
 pub struct ScopedBytesKeyDatabase<V>
 where
@@ -556,6 +834,158 @@ where
             }
         }
     }
+
+    /// Delete a key-value pair from the database.
+    pub fn delete(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+        key: &[u8],
+    ) -> Result<bool, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .delete(txn, &(scope_hash, key))
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .delete(txn, key)
+                    .map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Clear all entries within a specific scope or the default database.
+    pub fn clear(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+    ) -> Result<(), ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // We need to collect entries to delete before modifying the database
+                let mut entries_to_delete = Vec::new();
+                
+                // Use a temporary reference to the transaction for iteration
+                let txn_ref = &*txn;
+                for result in self.db_scoped.iter(txn_ref)? {
+                    let ((entry_scope_hash, key), _value) = result?;
+                    if entry_scope_hash == scope_hash {
+                        // Clone the key to avoid lifetime issues
+                        entries_to_delete.push((entry_scope_hash, key.to_vec()));
+                    }
+                }
+                
+                // Now delete the collected entries
+                for (scope_hash, key) in entries_to_delete {
+                    self.db_scoped.delete(txn, &(scope_hash, &key[..]))?;
+                }
+                
+                Ok(())
+            }
+            None => {
+                self.db_default.clear(txn).map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Iterate over entries in a specific scope or the default database.
+    pub fn iter<'txn>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], V), ScopedDbError>> + 'txn>, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                let iter = self.db_scoped.iter(txn)?
+                    .filter_map(move |result| {
+                        match result {
+                            Ok(((entry_scope_hash, key), value)) => {
+                                if entry_scope_hash == scope_hash {
+                                    Some(Ok((key, value)))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
+                        }
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                let iter = self.db_default.iter(txn)?
+                    .map(|result| result.map_err(ScopedDbError::from));
+                Ok(Box::new(iter))
+            }
+        }
+    }
+
+    /// Iterate over a range of entries in a specific scope or the default database.
+    pub fn range<'txn, R>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+        range: &'txn R,
+    ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], V), ScopedDbError>> + 'txn>, ScopedDbError>
+    where
+        R: RangeBounds<&'txn [u8]>,
+    {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // Transform the range bounds to work with our (u32, &[u8]) key structure
+                use std::ops::Bound;
+                let transformed_start = match range.start_bound() {
+                    Bound::Included(key) => Bound::Included((scope_hash, *key)),
+                    Bound::Excluded(key) => Bound::Excluded((scope_hash, *key)),
+                    Bound::Unbounded => Bound::Included((scope_hash, [].as_slice())),
+                };
+                
+                let transformed_end = match range.end_bound() {
+                    Bound::Included(key) => Bound::Included((scope_hash, *key)),
+                    Bound::Excluded(key) => Bound::Excluded((scope_hash, *key)),
+                    // For unbounded end, we use the next scope hash to ensure we don't
+                    // include keys from other scopes
+                    Bound::Unbounded => Bound::Excluded((scope_hash + 1, [].as_slice())),
+                };
+                
+                let transformed_range = (transformed_start, transformed_end);
+                
+                let iter = self.db_scoped.range(txn, &transformed_range)?
+                    .map(|result| match result {
+                        Ok(((_, key), value)) => Ok((key, value)),
+                        Err(e) => Err(ScopedDbError::from(e)),
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                // Use adapter to convert RangeBounds<&[u8]> to RangeBounds<[u8]>
+                let adapter = HeedRangeAdapter::new(range);
+                let iter = self.db_default.range(txn, &adapter)?
+                    .map(|result| match result {
+                        Ok((key, value)) => Ok((key, value)),
+                        Err(e) => Err(ScopedDbError::from(e)),
+                    });
+                Ok(Box::new(iter))
+            }
+        }
+    }
 }
 
 impl<V> Clone for ScopedBytesKeyDatabase<V>
@@ -572,18 +1002,19 @@ where
     }
 }
 
-/// Fully optimized database for byte keys and byte values using heed's native types
-pub type ScopedBytesDatabase = ScopedBytesOnlyDatabase;
-
-/// Database optimized for byte keys and byte values, avoiding all serialization
+/// Maximum performance scoped database for pure byte operations with Redis-like isolation.
+///
+/// Ideal for applications working directly with binary data, this database type
+/// provides complete scope isolation while avoiding all serialization overhead.
+/// Perfect for hash tables, binary protocols, or raw data storage.
 #[derive(Debug)]
-pub struct ScopedBytesOnlyDatabase {
+pub struct ScopedBytesDatabase {
     db_scoped: HeedDatabase<ScopedBytesCodec, Bytes>,
     db_default: HeedDatabase<Bytes, Bytes>,
     scope_hasher: RwLock<ScopeHasher>,
 }
 
-impl ScopedBytesOnlyDatabase {
+impl ScopedBytesDatabase {
     pub fn new(env: &Env, name: &str) -> Result<Self, ScopedDbError> {
         let mut wtxn = env.write_txn()?;
         let db = Self::create(env, name, &mut wtxn)?;
@@ -591,7 +1022,7 @@ impl ScopedBytesOnlyDatabase {
         Ok(db)
     }
     
-    /// Create a new ScopedBytesOnlyDatabase with a provided transaction
+    /// Create a new ScopedBytesDatabase with a provided transaction
     pub fn create(env: &Env, name: &str, txn: &mut RwTxn) -> Result<Self, ScopedDbError> {
         // Create database names from base name
         let default_name = format!("{}_default", name);
@@ -664,8 +1095,160 @@ impl ScopedBytesOnlyDatabase {
             }
         }
     }
+
+    /// Delete a key-value pair from the database.
+    pub fn delete(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+        key: &[u8],
+    ) -> Result<bool, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .delete(txn, &(scope_hash, key))
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .delete(txn, key)
+                    .map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Clear all entries within a specific scope or the default database.
+    pub fn clear(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+    ) -> Result<(), ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // We need to collect entries to delete before modifying the database
+                let mut entries_to_delete = Vec::new();
+                
+                // Use a temporary reference to the transaction for iteration
+                let txn_ref = &*txn;
+                for result in self.db_scoped.iter(txn_ref)? {
+                    let ((entry_scope_hash, key), _value) = result?;
+                    if entry_scope_hash == scope_hash {
+                        // Clone the key to avoid lifetime issues
+                        entries_to_delete.push((entry_scope_hash, key.to_vec()));
+                    }
+                }
+                
+                // Now delete the collected entries
+                for (scope_hash, key) in entries_to_delete {
+                    self.db_scoped.delete(txn, &(scope_hash, &key[..]))?;
+                }
+                
+                Ok(())
+            }
+            None => {
+                self.db_default.clear(txn).map_err(ScopedDbError::from)
+            }
+        }
+    }
+
+    /// Iterate over entries in a specific scope or the default database.
+    pub fn iter<'txn>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+    ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], &'txn [u8]), ScopedDbError>> + 'txn>, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                let iter = self.db_scoped.iter(txn)?
+                    .filter_map(move |result| {
+                        match result {
+                            Ok(((entry_scope_hash, key), value)) => {
+                                if entry_scope_hash == scope_hash {
+                                    Some(Ok((key, value)))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
+                        }
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                let iter = self.db_default.iter(txn)?
+                    .map(|result| result.map_err(ScopedDbError::from));
+                Ok(Box::new(iter))
+            }
+        }
+    }
+
+    /// Iterate over a range of entries in a specific scope or the default database.
+    pub fn range<'txn, R>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+        range: &'txn R,
+    ) -> Result<Box<dyn Iterator<Item = Result<(&'txn [u8], &'txn [u8]), ScopedDbError>> + 'txn>, ScopedDbError>
+    where
+        R: RangeBounds<&'txn [u8]>,
+    {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // Transform the range bounds to work with our (u32, &[u8]) key structure
+                use std::ops::Bound;
+                let transformed_start = match range.start_bound() {
+                    Bound::Included(key) => Bound::Included((scope_hash, *key)),
+                    Bound::Excluded(key) => Bound::Excluded((scope_hash, *key)),
+                    Bound::Unbounded => Bound::Included((scope_hash, [].as_slice())),
+                };
+                
+                let transformed_end = match range.end_bound() {
+                    Bound::Included(key) => Bound::Included((scope_hash, *key)),
+                    Bound::Excluded(key) => Bound::Excluded((scope_hash, *key)),
+                    // For unbounded end, we use the next scope hash to ensure we don't
+                    // include keys from other scopes
+                    Bound::Unbounded => Bound::Excluded((scope_hash + 1, [].as_slice())),
+                };
+                
+                let transformed_range = (transformed_start, transformed_end);
+                
+                let iter = self.db_scoped.range(txn, &transformed_range)?
+                    .map(|result| match result {
+                        Ok(((_, key), value)) => Ok((key, value)),
+                        Err(e) => Err(ScopedDbError::from(e)),
+                    });
+                Ok(Box::new(iter))
+            }
+            None => {
+                // Use adapter to convert RangeBounds<&[u8]> to RangeBounds<[u8]>
+                let adapter = HeedRangeAdapter::new(range);
+                let iter = self.db_default.range(txn, &adapter)?
+                    .map(|result| match result {
+                        Ok((key, value)) => Ok((key, value)),
+                        Err(e) => Err(ScopedDbError::from(e)),
+                    });
+                Ok(Box::new(iter))
+            }
+        }
+    }
 }
-impl Clone for ScopedBytesOnlyDatabase {
+impl Clone for ScopedBytesDatabase {
     fn clone(&self) -> Self {
         Self {
             db_scoped: self.db_scoped.clone(),

@@ -26,7 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Test generic database with Vec<u8> keys
-    println!("Testing generic ScopedDatabase with Vec<u8> keys...");
+    println!("=== Performance Comparison with Scope Isolation ===\n");
+    
     let mut wtxn = env.write_txn()?;
     let generic_db = scoped_database_options(&env)
         .types::<Vec<u8>, Document>()
@@ -34,24 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
     
-    {
-        let mut wtxn = env.write_txn()?;
-        
-        let doc1 = Document {
-            id: 1,
-            title: "Introduction".to_string(),
-            content: "This is the introduction.".to_string(),
-        };
-        
-        // Key as Vec<u8>
-        let key = b"doc1".to_vec();
-        generic_db.put(&mut wtxn, Some("tenant_a"), &key, &doc1)?;
-        
-        wtxn.commit()?;
-    }
-    
     // Test optimized bytes database
-    println!("Testing optimized ScopedBytesKeyDatabase...");
     let mut wtxn = env.write_txn()?;
     let bytes_db = scoped_database_options(&env)
         .bytes_keys::<Document>()
@@ -59,40 +43,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
     
+    // Demonstrate scope isolation with both database types
     {
         let mut wtxn = env.write_txn()?;
         
-        let doc2 = Document {
-            id: 2,
-            title: "Chapter 1".to_string(),
-            content: "This is chapter 1.".to_string(),
+        // Create same document for different customers - complete isolation
+        let doc_intro = Document {
+            id: 1,
+            title: "Customer Guide".to_string(),
+            content: "Welcome to our service!".to_string(),
         };
         
-        // Key as &[u8] - no allocation needed
-        bytes_db.put(&mut wtxn, Some("tenant_b"), b"doc2", &doc2)?;
+        // Customer A gets their own version in generic DB
+        let key = b"intro".to_vec();
+        generic_db.put(&mut wtxn, Some("customer_a"), &key, &doc_intro)?;
+        
+        // Customer B gets a different version in generic DB
+        let doc_custom = Document {
+            id: 1,
+            title: "Enterprise Guide".to_string(),
+            content: "Welcome to the enterprise tier!".to_string(),
+        };
+        generic_db.put(&mut wtxn, Some("customer_b"), &key, &doc_custom)?;
+        
+        // Same isolation pattern with bytes DB
+        bytes_db.put(&mut wtxn, Some("customer_a"), b"manual", &Document {
+            id: 2,
+            title: "User Manual".to_string(),
+            content: "Basic user instructions".to_string(),
+        })?;
+        
+        bytes_db.put(&mut wtxn, Some("customer_b"), b"manual", &Document {
+            id: 2,
+            title: "Admin Manual".to_string(),
+            content: "Advanced administration guide".to_string(),
+        })?;
         
         wtxn.commit()?;
     }
     
-    // Read data back
+    // Read data back showing complete isolation
     {
         let rtxn = env.read_txn()?;
         
-        // Read from generic database
-        let key = b"doc1".to_vec();
-        let doc1 = generic_db.get(&rtxn, Some("tenant_a"), &key)?;
-        println!("Generic DB - doc1: {:?}", doc1);
+        println!("Generic DB - Scope Isolation:");
+        let key = b"intro".to_vec();
+        let customer_a_doc = generic_db.get(&rtxn, Some("customer_a"), &key)?;
+        let customer_b_doc = generic_db.get(&rtxn, Some("customer_b"), &key)?;
+        println!("  Customer A intro: {:?}", customer_a_doc.map(|d| d.title));
+        println!("  Customer B intro: {:?}", customer_b_doc.map(|d| d.title));
         
-        // Read from bytes database (no allocation for key)
-        let doc2 = bytes_db.get(&rtxn, Some("tenant_b"), b"doc2")?;
-        println!("Bytes DB - doc2: {:?}", doc2);
+        println!("\nBytes DB - Scope Isolation:");
+        let customer_a_manual = bytes_db.get(&rtxn, Some("customer_a"), b"manual")?;
+        let customer_b_manual = bytes_db.get(&rtxn, Some("customer_b"), b"manual")?;
+        println!("  Customer A manual: {:?}", customer_a_manual.map(|d| d.title));
+        println!("  Customer B manual: {:?}", customer_b_manual.map(|d| d.title));
     }
     
-    println!("\nThe ScopedBytesKeyDatabase avoids:");
-    println!("1. Serde serialization overhead for keys");
-    println!("2. Allocations for fixed-size keys");
-    println!("3. General-purpose encoding machinery");
-    println!("\nWhile maintaining byte-for-byte compatibility with the generic version!");
+    println!("\n✅ Both database types provide complete scope isolation!");
+    println!("\nPerformance benefits of ScopedBytesKeyDatabase:");
+    println!("1. No serialization overhead for keys");
+    println!("2. Zero allocations for fixed-size keys");
+    println!("3. Direct memory operations");
+    println!("\nWhile maintaining the same Redis-like isolation semantics!");
 
     // Clean up
     drop(env);

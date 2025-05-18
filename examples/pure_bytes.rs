@@ -25,59 +25,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
-    // Binary data operations
+    // Binary data operations demonstrating Redis-like isolation
     {
         let mut wtxn = env.write_txn()?;
         
-        // Store binary hash values
-        let hash1 = b"\x12\x34\x56\x78\x9a\xbc\xde\xf0";
-        let data1 = b"\xff\xee\xdd\xcc\xbb\xaa\x99\x88";
+        // Each service component gets its own isolated scope
         
-        // Default scope
-        db.put(&mut wtxn, None, hash1, data1)?;
+        // Authentication service scope
+        let auth_token = b"token_abc123";
+        let auth_data = b"\x01\x23\x45\x67\x89\xab\xcd\xef"; // encrypted token
+        db.put(&mut wtxn, Some("auth_service"), auth_token, auth_data)?;
         
-        // Named scope for cache
-        let cache_key = b"session_123456";
-        let cache_data = b"user_session_data_here";
-        db.put(&mut wtxn, Some("cache"), cache_key, cache_data)?;
+        // Cache service scope - can use same key names without collision
+        let cache_token = b"token_abc123"; // Same key name!
+        let cache_data = b"cached_user_session_data";
+        db.put(&mut wtxn, Some("cache_service"), cache_token, cache_data)?;
         
-        // Named scope for metrics
-        let metric_key = b"cpu_usage";
-        let metric_value = &50u32.to_le_bytes(); // 50 as 32-bit little-endian
-        db.put(&mut wtxn, Some("metrics"), metric_key, metric_value)?;
+        // Metrics service scope - again same key names, different data
+        let metric_token = b"token_abc123"; // Same key name again!
+        let metric_data = &42u32.to_le_bytes(); // different type of data
+        db.put(&mut wtxn, Some("metrics_service"), metric_token, metric_data)?;
+        
+        // Configuration in default scope
+        let config_key = b"max_connections";
+        let config_value = &1000u32.to_le_bytes();
+        db.put(&mut wtxn, None, config_key, config_value)?;
         
         wtxn.commit()?;
     }
 
-    // Read binary data back
+    // Read binary data back - demonstrating complete isolation
     {
         let rtxn = env.read_txn()?;
         
-        // Read from default scope
-        let hash1 = b"\x12\x34\x56\x78\x9a\xbc\xde\xf0";
-        if let Some(data) = db.get(&rtxn, None, hash1)? {
-            println!("Default data: {:?}", data);
+        println!("=== Redis-like Scope Isolation with Binary Data ===\n");
+        
+        // Same key "token_abc123" has different values in each scope
+        let key = b"token_abc123";
+        
+        // Auth service sees encrypted token
+        if let Some(data) = db.get(&rtxn, Some("auth_service"), key)? {
+            println!("Auth service token: {:?} (encrypted binary)", data);
         }
         
-        // Read from cache scope
-        if let Some(session) = db.get(&rtxn, Some("cache"), b"session_123456")? {
-            println!("Cache data: {}", std::str::from_utf8(session).unwrap_or("<binary>"));
+        // Cache service sees session data
+        if let Some(data) = db.get(&rtxn, Some("cache_service"), key)? {
+            println!("Cache service token: {}", std::str::from_utf8(data).unwrap_or("<binary>"));
         }
         
-        // Read from metrics scope
-        if let Some(cpu_bytes) = db.get(&rtxn, Some("metrics"), b"cpu_usage")? {
-            if cpu_bytes.len() == 4 {
-                let cpu_value = u32::from_le_bytes([cpu_bytes[0], cpu_bytes[1], cpu_bytes[2], cpu_bytes[3]]);
-                println!("CPU usage: {}%", cpu_value);
+        // Metrics service sees numeric data
+        if let Some(data) = db.get(&rtxn, Some("metrics_service"), key)? {
+            if data.len() == 4 {
+                let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                println!("Metrics service token: {} (as u32)", value);
             }
         }
+        
+        // Config from default scope
+        if let Some(data) = db.get(&rtxn, None, b"max_connections")? {
+            if data.len() == 4 {
+                let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                println!("\nDefault scope config - max connections: {}", value);
+            }
+        }
+        
+        println!("\n✅ Same key name 'token_abc123' stores completely different data in each scope!");
     }
 
-    println!("\nPure bytes database advantages:");
+    println!("\nPure bytes database advantages with scope isolation:");
+    println!("- Complete Redis-like isolation between scopes");
     println!("- No serialization overhead for keys or values");
     println!("- Direct memory operations only");
-    println!("- Perfect for binary data like hashes, raw bytes");
-    println!("- Optimal performance for hot paths");
+    println!("- Perfect for binary data like hashes, tokens, metrics");
+    println!("- Each service component gets its own isolated namespace");
 
     // Clean up
     drop(env);

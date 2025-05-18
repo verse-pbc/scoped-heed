@@ -1,17 +1,17 @@
 # scoped-heed
 
-A Rust library that adds namespace (scope) support to the heed LMDB wrapper, allowing you to organize data into isolated scopes while maintaining compatibility with standard heed databases.
+A Rust library that adds Redis-like database isolation to the heed LMDB wrapper, providing isolated scopes (similar to Redis databases) within a single LMDB environment.
 
 ## Features
 
-- 🔍 **Scope-based Access**: Organize your data with named scopes (namespaces)
+- 🏗️ **Redis-like Database Isolation**: Each scope acts as an isolated database, similar to Redis's database numbers
+- 🔒 **Complete Scope Isolation**: Scopes are completely isolated from each other - no cross-scope queries or operations
 - 🏷️ **Default Scope Support**: Maintains compatibility with standard heed databases
 - 📦 **Generic Key/Value Types**: Use any type that implements Serialize/Deserialize
-- ⚡ **Efficient Operations**: Optimized iteration and bulk operations per scope
+- ⚡ **Efficient Scope Operations**: Native range queries and bulk operations within a scope
 - 🔄 **Seamless Integration**: Drop-in compatibility with existing heed environments
 - 🛡️ **Type-safe API**: Leverage Rust's type system for compile-time guarantees
 - 🔐 **Hash-based Scoping**: Uses 32-bit hashes for efficient scope identification
-- 🎯 **Tuple-based Keys**: Leverages heed's SerdeBincode for internal tuple representation
 
 ## Design
 
@@ -21,12 +21,26 @@ The library provides three main database implementations:
 2. **Performance-optimized `ScopedBytesKeyDatabase<V>`**: Uses native byte slices for keys, generic values
 3. **Fully-optimized `ScopedBytesDatabase`**: Uses native byte slices for both keys and values
 
+### Scope Isolation Model
+
+Think of scopes as completely isolated databases, similar to Redis's database model:
+- Each scope is a separate logical database within the same LMDB environment
+- Operations are confined to a single scope - no cross-scope queries or transactions
+- Keys can be identical across different scopes without collision
+- Clearing a scope only affects that specific scope's data
+
+This design is ideal for:
+- Multi-tenant applications where each tenant needs isolated data
+- Test isolation where each test uses its own scope
+- Modular systems where different components manage their own data
+
 ### How It Works
 
 All scoped entries have their keys internally prefixed with a 32-bit hash of the scope name. This ensures:
-- Data isolation between scopes
-- Efficient iteration within a scope
+- Complete data isolation between scopes
+- Efficient operations within a single scope
 - No key collisions between scopes
+- Native range query support per scope
 
 #### Key Encoding
 
@@ -322,23 +336,55 @@ Performance gains come from:
 - Direct memory operations
 - Optimized codec implementation
 
+## Database Operations
+
+All database types support the following operations:
+
+### Basic Operations
+```rust
+// Insert a key-value pair
+db.put(&mut wtxn, Some("scope"), &key, &value)?;
+
+// Retrieve a value
+let value = db.get(&rtxn, Some("scope"), &key)?;
+
+// Delete a key-value pair
+let was_deleted = db.delete(&mut wtxn, Some("scope"), &key)?;
+
+// Clear all entries in a scope
+db.clear(&mut wtxn, Some("scope"))?;
+
+// Iterate over entries in a scope
+for result in db.iter(&rtxn, Some("scope"))? {
+    let (key, value) = result?;
+    // Process key-value pair
+}
+```
+
+All operations work with both scoped (`Some("scope_name")`) and default (`None`) databases.
+
 ## Multi-tenant Example
 
 ```rust
-use scoped_heed::{ScopedStrDatabase, ScopedDbError};
+use scoped_heed::{scoped_database_options, ScopedDbError};
 
 fn main() -> Result<(), ScopedDbError> {
     let env = /* setup environment */;
-    let db = ScopedStrDatabase::new(&env)?;
+    
+    let mut wtxn = env.write_txn()?;
+    let db = scoped_database_options(&env)
+        .types::<String, String>()
+        .name("tenants")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
     
     let mut wtxn = env.write_txn()?;
     
     // Each tenant gets their own scope
-    // Internally uses SerdeBincode tuples for isolation
     db.put(&mut wtxn, Some("tenant1"), &"config".to_string(), &"value1".to_string())?;
     db.put(&mut wtxn, Some("tenant2"), &"config".to_string(), &"value2".to_string())?;
     
-    // Global data
+    // Global data in default scope
     db.put(&mut wtxn, None, &"system".to_string(), &"global".to_string())?;
     
     wtxn.commit()?;
@@ -349,6 +395,11 @@ fn main() -> Result<(), ScopedDbError> {
         let (key, value) = result?;
         println!("Tenant1: {} = {}", key, value);
     }
+    
+    // Clean up tenant1's data
+    let mut wtxn = env.write_txn()?;
+    db.clear(&mut wtxn, Some("tenant1"))?;
+    wtxn.commit()?;
     
     Ok(())
 }

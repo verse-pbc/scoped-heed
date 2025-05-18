@@ -2,8 +2,12 @@
 name = "scoped-heed"
 version = "0.1.0"
 edition = "2024"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Redis-like database isolation for LMDB via heed - provides completely isolated scopes within a single environment"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/scoped-heed"
+readme = "README.md"
+keywords = ["lmdb", "heed", "database", "scope", "isolation"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 heed = { version = ">=0.20, <0.23", default-features = false, features = ["serde-bincode"] }
@@ -18,6 +22,15 @@ name = "bytes_optimization"
 
 [[example]]
 name = "pure_bytes"
+
+[[example]]
+name = "multi_tenant"
+
+[[example]]
+name = "test_isolation"
+
+[[example]]
+name = "range_performance"
 
 [dev-dependencies]
 tempfile = "3"
