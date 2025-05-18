@@ -1,21 +1,30 @@
-use heed::types::Str;
 use heed::Database as HeedDatabase;
-use heed::{BytesDecode, BytesEncode};
-use heed::{Env, RoTxn as HeedRoTxn, RwTxn as HeedRwTxn};
-use std::borrow::Cow;
-use std::convert::TryInto;
+use heed::types::{Bytes, SerdeBincode};
+use heed::{Env, RoTxn as HeedRoTxn, RwTxn as HeedRwTxn, RwTxn};
+use heed::{BytesEncode, BytesDecode};
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
+use std::hash::Hasher;
+use std::marker::PhantomData;
+use std::sync::RwLock;
+use serde::{Serialize, Deserialize};
 
-const SCOPED_DB_NAME: &str = "my_scoped_db";
-const DEFAULT_DB_NAME: &str = "my_default_db";
+pub mod builder;
+pub use builder::scoped_database_options;
 
-/// Custom error for ScopedDatabase operations
+// Removed hardcoded database names - now constructed from base name
+
+/// Error type for scoped database operations.
 #[derive(Debug)]
 pub enum ScopedDbError {
     Heed(heed::Error),
+    /// Attempted to use an empty string as a scope name, which is disallowed.
     EmptyScopeDisallowed,
+    /// Other input validation errors.
     InvalidInput(String),
+    /// Encoding error
+    Encoding(String),
 }
 
 impl fmt::Display for ScopedDbError {
@@ -25,635 +34,643 @@ impl fmt::Display for ScopedDbError {
             ScopedDbError::EmptyScopeDisallowed => {
                 write!(
                     f,
-                    "Empty scope string (\"\") is not allowed for named scopes. If you intend to use the default (unscoped) database, use `None` instead."
+                    "Empty strings are not allowed as scope names. Use `None` for the default scope."
                 )
             }
-            ScopedDbError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
+            ScopedDbError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            ScopedDbError::Encoding(msg) => write!(f, "Encoding error: {}", msg),
         }
     }
 }
 
-impl StdError for ScopedDbError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            ScopedDbError::Heed(e) => Some(e),
-            _ => None,
-        }
-    }
-}
+impl StdError for ScopedDbError {}
 
 impl From<heed::Error> for ScopedDbError {
-    fn from(err: heed::Error) -> ScopedDbError {
-        ScopedDbError::Heed(err)
+    fn from(error: heed::Error) -> Self {
+        ScopedDbError::Heed(error)
     }
 }
 
-/// A helper struct to implement scoped databases using the Str type
-pub struct ScopedDatabase {
-    db_scoped: HeedDatabase<ScopedKeyCodec, Str>,
-    db_default: HeedDatabase<DefaultKeyStrCodec, Str>,
+impl From<Box<dyn std::error::Error + Send + Sync>> for ScopedDbError {
+    fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        ScopedDbError::Encoding(error.to_string())
+    }
 }
 
-impl ScopedDatabase {
-    /// Create a new scoped database wrapper
-    pub fn new(env: &Env) -> std::result::Result<Self, ScopedDbError> {
-        let db_scoped = {
-            let rtxn = env.read_txn()?;
-            match env.open_database::<ScopedKeyCodec, Str>(&rtxn, Some(SCOPED_DB_NAME))? {
-                Some(db) => {
-                    rtxn.commit()?;
-                    db
-                }
-                None => {
-                    drop(rtxn);
-                    let mut wtxn = env.write_txn()?;
-                    let db = env
-                        .create_database::<ScopedKeyCodec, Str>(&mut wtxn, Some(SCOPED_DB_NAME))?;
-                    wtxn.commit()?;
-                    db
-                }
-            }
-        };
+/// Manages scope hashes to avoid hash collisions.
+#[derive(Debug)]
+struct ScopeHasher {
+    scope_to_hash: HashMap<String, u32>,
+    hash_to_scope: HashMap<u32, String>,
+}
 
-        let db_default = {
-            let rtxn = env.read_txn()?;
-            match env.open_database::<DefaultKeyStrCodec, Str>(&rtxn, Some(DEFAULT_DB_NAME))? {
-                Some(db) => {
-                    rtxn.commit()?;
-                    db
-                }
-                None => {
-                    drop(rtxn);
-                    let mut wtxn = env.write_txn()?;
-                    let db = env.create_database::<DefaultKeyStrCodec, Str>(
-                        &mut wtxn,
-                        Some(DEFAULT_DB_NAME),
-                    )?;
-                    wtxn.commit()?;
-                    db
-                }
-            }
-        };
-
-        Ok(ScopedDatabase { db_scoped, db_default })
+impl ScopeHasher {
+    fn new() -> Self {
+        Self {
+            scope_to_hash: HashMap::new(),
+            hash_to_scope: HashMap::new(),
+        }
     }
 
-    // Add new direct operation methods
+    fn hash(&mut self, scope: &str) -> Result<u32, ScopedDbError> {
+        if let Some(&hash) = self.scope_to_hash.get(scope) {
+            return Ok(hash);
+        }
 
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(scope.as_bytes());
+        let full_hash = hasher.finish();
+        let hash = (full_hash & 0xFFFF_FFFF) as u32;
+
+        if let Some(existing_scope) = self.hash_to_scope.get(&hash) {
+            if existing_scope != scope {
+                return Err(ScopedDbError::InvalidInput(format!(
+                    "Hash collision detected between '{}' and '{}'",
+                    scope, existing_scope
+                )));
+            }
+        }
+
+        self.scope_to_hash.insert(scope.to_string(), hash);
+        self.hash_to_scope.insert(hash, scope.to_string());
+        Ok(hash)
+    }
+}
+
+/// Tuple type for scoped keys: (scope_hash, original_key)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedKey<K> {
+    pub scope_hash: u32,
+    pub key: K,
+}
+
+/// A scoped database implementation supporting both default (unscoped) and scoped data.
+/// 
+/// Keys and values can be any type that implements Serialize/Deserialize.
+/// Internally uses:
+/// - Direct key encoding for the default database
+/// - ScopedKey<K> tuple encoding for the scoped database
+#[derive(Debug)]
+pub struct ScopedDatabase<K, V>
+where
+    K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    db_scoped: HeedDatabase<SerdeBincode<ScopedKey<K>>, SerdeBincode<V>>,
+    db_default: HeedDatabase<SerdeBincode<K>, SerdeBincode<V>>,
+    scope_hasher: RwLock<ScopeHasher>,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<K, V> ScopedDatabase<K, V>
+where
+    K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    pub fn new(env: &Env, name: &str) -> Result<Self, ScopedDbError> {
+        let mut wtxn = env.write_txn()?;
+        let db = Self::create(env, name, &mut wtxn)?;
+        wtxn.commit()?;
+        Ok(db)
+    }
+    
+    /// Create a new ScopedDatabase with a provided transaction
+    pub fn create(env: &Env, name: &str, txn: &mut RwTxn) -> Result<Self, ScopedDbError> {
+        // Create database names from base name
+        let default_name = format!("{}_default", name);
+        let scoped_name = format!("{}_scoped", name);
+        
+        // Open databases
+        let db_default = env
+            .database_options()
+            .types::<SerdeBincode<K>, SerdeBincode<V>>()
+            .name(&default_name)
+            .create(txn)?;
+
+        let db_scoped = env
+            .database_options()
+            .types::<SerdeBincode<ScopedKey<K>>, SerdeBincode<V>>()
+            .name(&scoped_name)
+            .create(txn)?;
+
+        Ok(Self {
+            db_scoped,
+            db_default,
+            scope_hasher: RwLock::new(ScopeHasher::new()),
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Insert a key-value pair into the database.
     pub fn put(
         &self,
         txn: &mut HeedRwTxn<'_>,
         scope_name: Option<&str>,
-        key: &str,
-        value: &str,
+        key: &K,
+        value: &V,
     ) -> Result<(), ScopedDbError> {
         match scope_name {
             Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
             Some(actual_scope) => {
-                self.db_scoped.put(txn, &(actual_scope, key), value).map_err(ScopedDbError::from)
-            }
-            None => self.db_default.put(txn, key, value).map_err(ScopedDbError::from),
-        }
-    }
-
-    // 'txn_borrow is the lifetime of the borrowed transaction `txn`
-    pub fn get<'txn_borrow>(
-        &self,
-        txn: &'txn_borrow HeedRoTxn,
-        scope_name: Option<&str>,
-        key: &str,
-    ) -> Result<Option<&'txn_borrow str>, ScopedDbError> {
-        match scope_name {
-            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
-            Some(actual_scope) => {
-                self.db_scoped.get(txn, &(actual_scope, key)).map_err(ScopedDbError::from)
-            }
-            None => self.db_default.get(txn, key).map_err(ScopedDbError::from),
-        }
-    }
-
-    pub fn delete(
-        &self,
-        txn: &mut HeedRwTxn<'_>,
-        scope_name: Option<&str>,
-        key: &str,
-    ) -> Result<bool, ScopedDbError> {
-        match scope_name {
-            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
-            Some(actual_scope) => {
-                self.db_scoped.delete(txn, &(actual_scope, key)).map_err(ScopedDbError::from)
-            }
-            None => self.db_default.delete(txn, key).map_err(ScopedDbError::from),
-        }
-    }
-
-    pub fn clear_scope(
-        &self,
-        txn: &mut HeedRwTxn<'_>,
-        scope_name: Option<&str>,
-    ) -> Result<usize, ScopedDbError> {
-        let mut count = 0;
-        match scope_name {
-            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
-            Some(actual_scope) => {
-                let mut iter_mut = self.db_scoped.prefix_iter_mut(txn, &(actual_scope, ""))?;
-                while let Some(result) = iter_mut.next() {
-                    result.map_err(ScopedDbError::from)?;
-                    unsafe {
-                        iter_mut.del_current().map_err(ScopedDbError::from)?;
-                    }
-                    count += 1;
-                }
-                Ok(count)
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // Use ScopedKey tuple  
+                let scoped_key = ScopedKey {
+                    scope_hash,
+                    key: key.clone(),
+                };
+                self.db_scoped
+                    .put(txn, &scoped_key, value)
+                    .map_err(ScopedDbError::from)
             }
             None => {
-                // Clear entire default database
-                let mut iter_mut = self.db_default.iter_mut(txn)?;
-                while let Some(result) = iter_mut.next() {
-                    result.map_err(ScopedDbError::from)?;
-                    unsafe {
-                        iter_mut.del_current().map_err(ScopedDbError::from)?;
-                    }
-                    count += 1;
-                }
-                // For potentially better performance / completeness on full clear:
-                // self.db_default.clear(txn)?;
-                // However, to return the count, iteration is necessary.
-                Ok(count)
+                self.db_default
+                    .put(txn, key, value)
+                    .map_err(ScopedDbError::from)
             }
         }
     }
 
-    // 'txn_borrow is the lifetime of the borrowed transaction `txn`
-    pub fn iter<'txn_borrow>(
+    /// Get a value from the database.
+    pub fn get<'txn>(
         &self,
-        txn: &'txn_borrow HeedRoTxn,
+        txn: &'txn HeedRoTxn,
         scope_name: Option<&str>,
-    ) -> Result<ScopedIter<'txn_borrow>, ScopedDbError> {
+        key: &K,
+    ) -> Result<Option<V>, ScopedDbError> {
         match scope_name {
             Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
             Some(actual_scope) => {
-                let iter_native = self.db_scoped.prefix_iter(txn, &(actual_scope, ""))?;
-                Ok(ScopedIter::Scoped(iter_native))
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                // Use ScopedKey tuple
+                let scoped_key = ScopedKey {
+                    scope_hash,
+                    key: key.clone(),
+                };
+                self.db_scoped
+                    .get(txn, &scoped_key)
+                    .map_err(ScopedDbError::from)
             }
             None => {
-                let iter_native = self.db_default.iter(txn)?;
-                Ok(ScopedIter::Default(iter_native))
+                self.db_default
+                    .get(txn, key)
+                    .map_err(ScopedDbError::from)
             }
         }
     }
 }
 
-pub enum ScopedIter<'iter_life> {
-    Default(heed::RoIter<'iter_life, DefaultKeyStrCodec, Str>),
-    Scoped(heed::RoPrefix<'iter_life, ScopedKeyCodec, Str>),
-}
-
-impl<'iter_life> Iterator for ScopedIter<'iter_life> {
-    type Item = std::result::Result<(&'iter_life str, &'iter_life str), ScopedDbError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            ScopedIter::Default(iter) => iter.next().map(|res| res.map_err(ScopedDbError::from)),
-            ScopedIter::Scoped(iter) => iter.next().map(|res| match res {
-                Ok(((_scope_str, original_key_str), value_str)) => {
-                    Ok((original_key_str, value_str))
-                }
-                Err(e) => Err(ScopedDbError::from(e)),
-            }),
+impl<K, V> Clone for ScopedDatabase<K, V>
+where
+    K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            db_scoped: self.db_scoped.clone(),
+            db_default: self.db_default.clone(),
+            scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
+            _phantom: PhantomData,
         }
-    }
-}
-
-// Custom codec for (scope, key) tuples
-pub struct ScopedKeyCodec;
-
-impl<'encode> BytesEncode<'encode> for ScopedKeyCodec {
-    type EItem = (&'encode str, &'encode str);
-
-    fn bytes_encode(
-        item: &Self::EItem,
-    ) -> std::result::Result<Cow<'encode, [u8]>, Box<dyn StdError + Send + Sync + 'static>> {
-        let (scope, key) = *item;
-        assert!(!scope.is_empty(), "ScopedKeyCodec should not be used with an empty scope string.");
-        let scope_bytes = scope.as_bytes();
-        let key_bytes = key.as_bytes();
-
-        let scope_len = scope_bytes.len();
-        if scope_len > u32::MAX as usize {
-            return Err(Box::new(heed::Error::Encoding(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Scope string too long to encode its length in u32",
-            )))));
-        }
-        let scope_len_u32 = scope_len as u32;
-
-        let mut owned_bytes = Vec::with_capacity(4 + scope_bytes.len() + key_bytes.len());
-        owned_bytes.extend_from_slice(&scope_len_u32.to_be_bytes());
-        owned_bytes.extend_from_slice(scope_bytes);
-        owned_bytes.extend_from_slice(key_bytes);
-        Ok(Cow::Owned(owned_bytes))
-    }
-}
-
-impl<'decode> BytesDecode<'decode> for ScopedKeyCodec {
-    type DItem = (&'decode str, &'decode str);
-
-    fn bytes_decode(
-        bytes: &'decode [u8],
-    ) -> std::result::Result<Self::DItem, Box<dyn StdError + Send + Sync + 'static>> {
-        if bytes.len() < 4 {
-            return Err(Box::new(heed::Error::Decoding(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Byte slice too short for scope length",
-            )))));
-        }
-
-        let scope_len_bytes: [u8; 4] =
-            bytes[0..4].try_into().map_err(|e| -> Box<dyn StdError + Send + Sync + 'static> {
-                Box::new(heed::Error::Decoding(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to read scope length bytes: {}", e),
-                ))))
-            })?;
-        let scope_len = u32::from_be_bytes(scope_len_bytes) as usize;
-
-        let scope_end_index = 4 + scope_len;
-        if bytes.len() < scope_end_index {
-            return Err(Box::new(heed::Error::Decoding(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Byte slice too short for declared scope length",
-            )))));
-        }
-
-        let scope_bytes = &bytes[4..scope_end_index];
-        let key_bytes = &bytes[scope_end_index..];
-
-        let scope_str = std::str::from_utf8(scope_bytes).map_err(|e| {
-            Box::new(heed::Error::Decoding(Box::new(e)))
-                as Box<dyn StdError + Send + Sync + 'static>
-        })?; // Cast to trait object
-        let key_str = std::str::from_utf8(key_bytes).map_err(|e| {
-            Box::new(heed::Error::Decoding(Box::new(e)))
-                as Box<dyn StdError + Send + Sync + 'static>
-        })?; // Cast to trait object
-
-        Ok((scope_str, key_str))
-    }
-}
-
-// New codec for default database keys, functionally identical to Str
-// but a distinct type to potentially alter compiler lifetime inference.
-pub struct DefaultKeyStrCodec;
-
-impl<'encode> BytesEncode<'encode> for DefaultKeyStrCodec {
-    type EItem = str; // Key type is str (unsized, like in heed::types::Str)
-
-    fn bytes_encode(
-        item: &'encode Self::EItem, // This becomes &'encode str
-    ) -> std::result::Result<Cow<'encode, [u8]>, Box<dyn StdError + Send + Sync + 'static>> {
-        // Delegate to Str's encoding for &str
-        heed::types::Str::bytes_encode(item)
-    }
-}
-
-impl<'decode> BytesDecode<'decode> for DefaultKeyStrCodec {
-    type DItem = &'decode str; // Decoded type is &'decode str
-
-    fn bytes_decode(
-        bytes: &'decode [u8],
-    ) -> std::result::Result<Self::DItem, Box<dyn StdError + Send + Sync + 'static>> {
-        // Delegate to Str's decoding
-        heed::types::Str::bytes_decode(bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::needless_option_as_deref)]
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use super::*;
+    use heed::{EnvOpenOptions};
+    
+    #[test]
+    fn test_basic_string_operations() -> Result<(), ScopedDbError> {
+        let db_path = "./test_scoped_db";
+        if std::path::Path::new(db_path).exists() {
+            std::fs::remove_dir_all(db_path).unwrap();
+        }
+        std::fs::create_dir_all(db_path).unwrap();
 
-    use super::{ScopedDatabase, ScopedDbError};
-    use heed::types::Str;
-    use heed::{Env, EnvOpenOptions};
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(10 * 1024 * 1024)
+                .max_dbs(4)
+                .open(db_path)?
+        };
 
-    static TEST_DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        type ScopedStrDatabase = ScopedDatabase<String, String>;
+        let db = ScopedStrDatabase::new(&env, "test")?;
+        
+        {
+            let mut wtxn = env.write_txn()?;
+            db.put(&mut wtxn, Some("main"), &"user1".to_string(), &"Alice (main)".to_string())?;
+            wtxn.commit()?;
+        }
+        
+        {
+            let rtxn = env.read_txn()?;
+            let value = db.get(&rtxn, Some("main"), &"user1".to_string())?;
+            assert_eq!(value, Some("Alice (main)".to_string()));
+        }
+        
+        // Clean up
+        drop(env);
+        std::fs::remove_dir_all(db_path).unwrap();
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_encoding_compatibility() -> Result<(), ScopedDbError> {
+        // Test that our manual encoding matches bincode encoding
+        use bincode;
+        
+        let scope_hash = 0x12345678u32;
+        let key_bytes = b"test_key";
+        
+        // Create our ScopedKey struct
+        let scoped_key = ScopedKey {
+            scope_hash,
+            key: key_bytes.to_vec(),
+        };
+        
+        // Encode with bincode
+        let bincode_encoded = bincode::serialize(&scoped_key).unwrap();
+        
+        // Encode with our manual encoder
+        let manual_encoded = ScopedBytesCodec::encode(scope_hash, key_bytes);
+        
+        // They should be identical
+        assert_eq!(bincode_encoded, manual_encoded);
+        
+        // Test decoding
+        let (decoded_hash, decoded_key) = ScopedBytesCodec::decode(&manual_encoded)?;
+        assert_eq!(decoded_hash, scope_hash);
+        assert_eq!(decoded_key, key_bytes);
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_bytes_database() -> Result<(), ScopedDbError> {
+        let db_path = "./test_bytes_db";
+        if std::path::Path::new(db_path).exists() {
+            std::fs::remove_dir_all(db_path).unwrap();
+        }
+        std::fs::create_dir_all(db_path).unwrap();
 
-    struct TestEnv {
-        env: Env,
-        db_path: PathBuf,
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(10 * 1024 * 1024)
+                .max_dbs(4)
+                .open(db_path)?
+        };
+
+        let db = ScopedBytesKeyDatabase::<String>::new(&env, "test_bytes")?;
+        
+        {
+            let mut wtxn = env.write_txn()?;
+            db.put(&mut wtxn, Some("main"), b"key1", &"value1".to_string())?;
+            db.put(&mut wtxn, None, b"key2", &"value2".to_string())?;
+            wtxn.commit()?;
+        }
+        
+        {
+            let rtxn = env.read_txn()?;
+            let value1 = db.get(&rtxn, Some("main"), b"key1")?;
+            let value2 = db.get(&rtxn, None, b"key2")?;
+            assert_eq!(value1, Some("value1".to_string()));
+            assert_eq!(value2, Some("value2".to_string()));
+        }
+        
+        // Clean up
+        drop(env);
+        std::fs::remove_dir_all(db_path).unwrap();
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_fully_optimized_bytes_database() -> Result<(), ScopedDbError> {
+        let db_path = "./test_pure_bytes_db";
+        if std::path::Path::new(db_path).exists() {
+            std::fs::remove_dir_all(db_path).unwrap();
+        }
+        std::fs::create_dir_all(db_path).unwrap();
+
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(10 * 1024 * 1024)
+                .max_dbs(4)
+                .open(db_path)?
+        };
+
+        let db = ScopedBytesDatabase::new(&env, "test_pure")?;
+        
+        {
+            let mut wtxn = env.write_txn()?;
+            // Test with binary data
+            db.put(&mut wtxn, Some("binary"), b"\x00\x01\x02\x03", b"\xff\xfe\xfd\xfc")?;
+            db.put(&mut wtxn, None, b"default_key", b"default_value")?;
+            wtxn.commit()?;
+        }
+        
+        {
+            let rtxn = env.read_txn()?;
+            let binary_value = db.get(&rtxn, Some("binary"), b"\x00\x01\x02\x03")?;
+            assert_eq!(binary_value, Some(&b"\xff\xfe\xfd\xfc"[..]));
+            
+            let default_value = db.get(&rtxn, None, b"default_key")?;
+            assert_eq!(default_value, Some(&b"default_value"[..]));
+        }
+        
+        // Clean up
+        drop(env);
+        std::fs::remove_dir_all(db_path).unwrap();
+        
+        Ok(())
+    }
+}
+
+/// Specialized codec for byte-based scoped keys to match bincode encoding
+#[doc(hidden)]
+pub enum ScopedBytesCodec {}
+
+impl ScopedBytesCodec {
+    #[inline]
+    pub fn encode(scope_hash: u32, key: &[u8]) -> Vec<u8> {
+        // Total size: 4 (u32) + 8 (u64 length) + key.len()
+        let mut output = Vec::with_capacity(12 + key.len());
+        
+        // 1. Encode scope_hash as u32 little-endian (4 bytes)
+        output.extend_from_slice(&scope_hash.to_le_bytes());
+        
+        // 2. Encode key length as u64 little-endian (8 bytes) - to match bincode
+        let key_len = key.len() as u64;
+        output.extend_from_slice(&key_len.to_le_bytes());
+        
+        // 3. Encode key bytes
+        output.extend_from_slice(key);
+        
+        output
+    }
+    
+    #[inline]
+    pub fn decode(bytes: &[u8]) -> Result<(u32, &[u8]), ScopedDbError> {
+        if bytes.len() < 12 {
+            return Err(ScopedDbError::Encoding("Not enough bytes to decode scoped key".into()));
+        }
+        
+        // 1. Decode scope_hash
+        let scope_hash = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        
+        // 2. Decode key length
+        let key_len_bytes = &bytes[4..12];
+        let key_len = u64::from_le_bytes(key_len_bytes.try_into().unwrap());
+        
+        // 3. Extract key
+        let key_start = 12;
+        let key_end = key_start + key_len as usize;
+        if bytes.len() < key_end {
+            return Err(ScopedDbError::Encoding("Not enough bytes for key".into()));
+        }
+        let key = &bytes[key_start..key_end];
+        
+        Ok((scope_hash, key))
+    }
+}
+
+impl<'a> BytesEncode<'a> for ScopedBytesCodec {
+    type EItem = (u32, &'a [u8]);
+
+    fn bytes_encode((scope_hash, key): &Self::EItem) -> Result<std::borrow::Cow<'a, [u8]>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(std::borrow::Cow::Owned(Self::encode(*scope_hash, key)))
+    }
+}
+
+impl<'a> BytesDecode<'a> for ScopedBytesCodec {
+    type DItem = (u32, &'a [u8]);
+
+    fn bytes_decode(bytes: &'a [u8]) -> Result<Self::DItem, Box<dyn std::error::Error + Send + Sync>> {
+        Self::decode(bytes).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
+/// Specialized ScopedDatabase for byte keys with optimized performance
+#[derive(Debug)]
+pub struct ScopedBytesKeyDatabase<V>
+where
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    db_scoped: HeedDatabase<ScopedBytesCodec, SerdeBincode<V>>,
+    db_default: HeedDatabase<Bytes, SerdeBincode<V>>,
+    scope_hasher: RwLock<ScopeHasher>,
+    _phantom: PhantomData<V>,
+}
+
+impl<V> ScopedBytesKeyDatabase<V>
+where
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    pub fn new(env: &Env, name: &str) -> Result<Self, ScopedDbError> {
+        let mut wtxn = env.write_txn()?;
+        let db = Self::create(env, name, &mut wtxn)?;
+        wtxn.commit()?;
+        Ok(db)
+    }
+    
+    /// Create a new ScopedBytesKeyDatabase with a provided transaction
+    pub fn create(env: &Env, name: &str, txn: &mut RwTxn) -> Result<Self, ScopedDbError> {
+        // Create database names from base name
+        let default_name = format!("{}_default", name);
+        let scoped_name = format!("{}_scoped", name);
+        
+        // Open databases
+        let db_default = env
+            .database_options()
+            .types::<Bytes, SerdeBincode<V>>()
+            .name(&default_name)
+            .create(txn)?;
+
+        let db_scoped = env
+            .database_options()
+            .types::<ScopedBytesCodec, SerdeBincode<V>>()
+            .name(&scoped_name)
+            .create(txn)?;
+
+        Ok(Self {
+            db_scoped,
+            db_default,
+            scope_hasher: RwLock::new(ScopeHasher::new()),
+            _phantom: PhantomData,
+        })
     }
 
-    impl TestEnv {
-        fn new(test_name: &str) -> Result<Self, ScopedDbError> {
-            let count = TEST_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let db_path = PathBuf::from(format!("./test_db_{}_{}", test_name, count));
-
-            if db_path.exists() {
-                fs::remove_dir_all(&db_path).map_err(|e| {
-                    ScopedDbError::InvalidInput(format!(
-                        "Failed to clean up old test DB dir: {}",
-                        e
-                    ))
-                })?;
+    /// Insert a key-value pair into the database.
+    pub fn put(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+        key: &[u8],
+        value: &V,
+    ) -> Result<(), ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .put(txn, &(scope_hash, key), value)
+                    .map_err(ScopedDbError::from)
             }
-            fs::create_dir_all(&db_path).map_err(|e| {
-                ScopedDbError::InvalidInput(format!("Failed to create test DB dir: {}", e))
-            })?;
-
-            // Intentionally not printing to stdout during library tests
-            // println!("TestEnv: Initializing new Env for path: {:?}", db_path);
-            let env = unsafe {
-                EnvOpenOptions::new()
-                    .map_size(10 * 1024 * 1024) // 10MB
-                    .max_dbs(15)
-                    .open(&db_path)?
-            };
-            // println!("TestEnv: Env initialized.");
-            Ok(TestEnv { env, db_path })
+            None => {
+                self.db_default
+                    .put(txn, key, value)
+                    .map_err(ScopedDbError::from)
+            }
         }
     }
 
-    impl Drop for TestEnv {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.db_path);
+    /// Get a value from the database.
+    pub fn get<'txn>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+        key: &[u8],
+    ) -> Result<Option<V>, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .get(txn, &(scope_hash, key))
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .get(txn, key)
+                    .map_err(ScopedDbError::from)
+            }
+        }
+    }
+}
+
+impl<V> Clone for ScopedBytesKeyDatabase<V>
+where
+    V: Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            db_scoped: self.db_scoped.clone(),
+            db_default: self.db_default.clone(),
+            scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Fully optimized database for byte keys and byte values using heed's native types
+pub type ScopedBytesDatabase = ScopedBytesOnlyDatabase;
+
+/// Database optimized for byte keys and byte values, avoiding all serialization
+#[derive(Debug)]
+pub struct ScopedBytesOnlyDatabase {
+    db_scoped: HeedDatabase<ScopedBytesCodec, Bytes>,
+    db_default: HeedDatabase<Bytes, Bytes>,
+    scope_hasher: RwLock<ScopeHasher>,
+}
+
+impl ScopedBytesOnlyDatabase {
+    pub fn new(env: &Env, name: &str) -> Result<Self, ScopedDbError> {
+        let mut wtxn = env.write_txn()?;
+        let db = Self::create(env, name, &mut wtxn)?;
+        wtxn.commit()?;
+        Ok(db)
+    }
+    
+    /// Create a new ScopedBytesOnlyDatabase with a provided transaction
+    pub fn create(env: &Env, name: &str, txn: &mut RwTxn) -> Result<Self, ScopedDbError> {
+        // Create database names from base name
+        let default_name = format!("{}_default", name);
+        let scoped_name = format!("{}_scoped", name);
+        
+        let db_default = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .name(&default_name)
+            .create(txn)?;
+
+        let db_scoped = env
+            .database_options()
+            .types::<ScopedBytesCodec, Bytes>()
+            .name(&scoped_name)
+            .create(txn)?;
+
+        Ok(Self {
+            db_scoped,
+            db_default,
+            scope_hasher: RwLock::new(ScopeHasher::new()),
+        })
+    }
+
+    pub fn put(
+        &self,
+        txn: &mut HeedRwTxn<'_>,
+        scope_name: Option<&str>,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .put(txn, &(scope_hash, key), value)
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .put(txn, key, value)
+                    .map_err(ScopedDbError::from)
+            }
         }
     }
 
-    #[test]
-    fn test_basic_scoped_operations() -> Result<(), ScopedDbError> {
-        let test_env = TestEnv::new("basic_ops_simplified")?;
-        let env = &test_env.env;
-
-        let user_db = ScopedDatabase::new(env)?;
-
-        {
-            let mut wtxn = env.write_txn()?;
-            user_db.put(&mut wtxn, Some("main"), "user1", "Alice (main)")?;
-            wtxn.commit()?;
+    pub fn get<'txn>(
+        &self,
+        txn: &'txn HeedRoTxn,
+        scope_name: Option<&str>,
+        key: &[u8],
+    ) -> Result<Option<&'txn [u8]>, ScopedDbError> {
+        match scope_name {
+            Some("") => Err(ScopedDbError::EmptyScopeDisallowed),
+            Some(actual_scope) => {
+                let mut hasher = self.scope_hasher.write().unwrap();
+                let scope_hash = hasher.hash(actual_scope)?;
+                
+                self.db_scoped
+                    .get(txn, &(scope_hash, key))
+                    .map_err(ScopedDbError::from)
+            }
+            None => {
+                self.db_default
+                    .get(txn, key)
+                    .map_err(ScopedDbError::from)
+            }
         }
-
-        {
-            let rtxn = env.read_txn()?;
-            let value = user_db.get(&rtxn, Some("main"), "user1")?;
-            let cloned_value_str = value.map(|s| s.to_string());
-            assert_eq!(cloned_value_str.as_deref(), Some("Alice (main)"));
-        }
-
-        {
-            let mut wtxn = env.write_txn()?;
-            user_db.put(&mut wtxn, None, "user_default", "Bob (default)")?;
-            wtxn.commit()?;
-        }
-
-        {
-            let rtxn = env.read_txn()?;
-            let value_default = user_db.get(&rtxn, None, "user_default")?;
-            let cloned_value_default_str = value_default.map(|s| s.to_string());
-            assert_eq!(cloned_value_default_str.as_deref(), Some("Bob (default)"));
-        }
-
-        // Restore more complete basic operations testing
-        {
-            let mut wtxn = env.write_txn()?;
-            user_db.put(&mut wtxn, Some("main"), "user2", "Bob (main)")?;
-            user_db.put(&mut wtxn, None, "user1_default", "Alice (default)")?;
-            user_db.put(&mut wtxn, None, "user4_default", "Zane (default)")?;
-            user_db.put(&mut wtxn, Some("customer"), "cust1", "David (customer)")?;
-            user_db.put(&mut wtxn, Some("customer"), "cust2", "Eve (customer)")?;
-            user_db.put(&mut wtxn, Some("admin"), "adm1", "Frank (admin)")?;
-            user_db.put(&mut wtxn, Some("admin"), "adm2", "Supervisor (admin)")?;
-            wtxn.commit()?;
-        }
-
-        {
-            let rtxn = env.read_txn()?;
-            let mut default_users: Vec<(String, String)> = user_db
-                .iter(&rtxn, None)?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            default_users.sort();
-            assert_eq!(
-                default_users,
-                vec![
-                    ("user1_default".to_string(), "Alice (default)".to_string()),
-                    ("user4_default".to_string(), "Zane (default)".to_string()),
-                    ("user_default".to_string(), "Bob (default)".to_string()),
-                ]
-            );
-
-            let mut main_users: Vec<(String, String)> = user_db
-                .iter(&rtxn, Some("main"))?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            main_users.sort();
-            assert_eq!(
-                main_users,
-                vec![
-                    ("user1".to_string(), "Alice (main)".to_string()),
-                    ("user2".to_string(), "Bob (main)".to_string()),
-                ]
-            );
-        }
-
-        {
-            let mut wtxn = env.write_txn()?;
-            assert!(user_db.delete(&mut wtxn, Some("customer"), "cust1")?);
-            assert!(!user_db.delete(&mut wtxn, Some("customer"), "non_existent_user")?);
-            assert!(user_db.delete(&mut wtxn, None, "user4_default")?);
-            assert_eq!(user_db.clear_scope(&mut wtxn, Some("admin"))?, 2);
-            wtxn.commit()?;
-        }
-
-        {
-            let rtxn = env.read_txn()?;
-            assert_eq!(user_db.get(&rtxn, Some("customer"), "cust1")?.map(|s| s.to_string()), None);
-            assert_eq!(
-                user_db.get(&rtxn, Some("customer"), "cust2")?.map(|s| s.to_string()),
-                Some("Eve (customer)".to_string())
-            );
-            assert_eq!(user_db.get(&rtxn, None, "user4_default")?.map(|s| s.to_string()), None);
-            let admin_users_after_clear: Vec<(String, String)> = user_db
-                .iter(&rtxn, Some("admin"))?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            assert!(admin_users_after_clear.is_empty());
-        }
-
-        Ok(())
     }
-
-    #[test]
-    fn test_additional_cases() -> Result<(), ScopedDbError> {
-        let test_env = TestEnv::new("additional_cases")?;
-        let env = &test_env.env;
-        let user_db = ScopedDatabase::new(env)?;
-
-        {
-            let mut wtxn = env.write_txn()?;
-            user_db.put(&mut wtxn, Some("main"), "user1", "Alice (main)")?;
-            wtxn.commit()?;
+}
+impl Clone for ScopedBytesOnlyDatabase {
+    fn clone(&self) -> Self {
+        Self {
+            db_scoped: self.db_scoped.clone(),
+            db_default: self.db_default.clone(),
+            scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
         }
-
-        {
-            let mut wtxn = env.write_txn()?;
-            user_db.put(&mut wtxn, Some("main"), "user1", "Alice Updated (main)")?;
-            let deleted_non_existent =
-                user_db.delete(&mut wtxn, Some("main"), "user_does_not_exist_in_main")?;
-            assert!(!deleted_non_existent, "Deleting a non-existent key should return false");
-            wtxn.commit()?;
-        }
-
-        {
-            let mut wtxn = env.write_txn()?;
-            let cleared_count_empty = user_db.clear_scope(&mut wtxn, Some("new_empty_scope"))?;
-            assert_eq!(cleared_count_empty, 0, "Clearing an empty scope should remove 0 items");
-            wtxn.commit()?;
-        }
-
-        {
-            let rtxn = env.read_txn()?;
-            assert_eq!(
-                user_db.get(&rtxn, Some("main"), "user1")?.as_deref(),
-                Some("Alice Updated (main)")
-            );
-            let get_non_existent = user_db.get(&rtxn, Some("main"), "really_does_not_exist")?;
-            assert!(get_non_existent.is_none(), "Getting a non-existent key should return None");
-
-            let new_empty_items: Vec<(String, String)> = user_db
-                .iter(&rtxn, Some("new_empty_scope"))?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            assert_eq!(new_empty_items.len(), 0, "new_empty_scope should be empty after clearing");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_legacy_db_compatibility() -> Result<(), ScopedDbError> {
-        const LEGACY_DEFAULT_DB_NAME: &str = "my_default_db"; // This matches the constant in the parent module
-        let test_env = TestEnv::new("legacy_compat")?;
-        let legacy_env = &test_env.env;
-        {
-            let mut wtxn_legacy_setup = legacy_env.write_txn()?;
-            // When testing legacy, we directly use heed's Database with Str, Str (or Bytes, Str as in original)
-            // to simulate an existing database created without DefaultKeyStrCodec.
-            let db = legacy_env.create_database::<Str, Str>(
-                &mut wtxn_legacy_setup,
-                Some(LEGACY_DEFAULT_DB_NAME),
-            )?;
-            db.put(&mut wtxn_legacy_setup, "legacy_key1", "legacy_value1_original")?;
-            db.put(&mut wtxn_legacy_setup, "legacy_key2", "legacy_value2_original")?;
-            wtxn_legacy_setup.commit()?;
-        }
-        {
-            // Diagnostic check: ensure the raw database was populated as expected
-            let rtxn_diag = legacy_env.read_txn()?;
-            let temp_db_handle = legacy_env
-                .open_database::<Str, Str>(&rtxn_diag, Some(LEGACY_DEFAULT_DB_NAME))?
-                .ok_or_else(|| {
-                    ScopedDbError::InvalidInput(format!(
-                        "DIAGNOSTIC: DB {} not found for Str, Str",
-                        LEGACY_DEFAULT_DB_NAME
-                    ))
-                })?;
-            assert_eq!(
-                temp_db_handle.get(&rtxn_diag, "legacy_key1")?,
-                Some("legacy_value1_original")
-            );
-        }
-
-        // Now, initialize ScopedDatabase on this environment
-        let scoped_db_on_legacy = ScopedDatabase::new(legacy_env)?;
-
-        // Test reading existing legacy data via ScopedDatabase's default (None) scope
-        {
-            let rtxn = legacy_env.read_txn()?; // Changed wtxn to rtxn for read operations
-            assert_eq!(
-                scoped_db_on_legacy.get(&rtxn, None, "legacy_key1")?.as_deref(),
-                Some("legacy_value1_original")
-            );
-            assert_eq!(
-                scoped_db_on_legacy.get(&rtxn, None, "legacy_key2")?.as_deref(),
-                Some("legacy_value2_original")
-            );
-        }
-
-        // Test writing new/overwriting legacy data via ScopedDatabase's default (None) scope
-        {
-            let mut wtxn = legacy_env.write_txn()?;
-            scoped_db_on_legacy.put(&mut wtxn, None, "new_default_key1", "new_default_value1")?;
-            scoped_db_on_legacy.put(
-                &mut wtxn,
-                None,
-                "legacy_key1",
-                "legacy_value1_overwritten_by_scoped",
-            )?;
-            wtxn.commit()?;
-        }
-
-        // Test writing to a new named scope in the same environment
-        {
-            let mut wtxn = legacy_env.write_txn()?;
-            scoped_db_on_legacy.put(
-                &mut wtxn,
-                Some("brand_new_scope"),
-                "new_scoped_key1",
-                "new_scoped_value1_in_brand_new",
-            )?;
-            wtxn.commit()?;
-        }
-
-        // Final verification
-        {
-            let rtxn = legacy_env.read_txn()?;
-            assert_eq!(
-                scoped_db_on_legacy.get(&rtxn, None, "legacy_key1")?.as_deref(),
-                Some("legacy_value1_overwritten_by_scoped")
-            );
-            assert_eq!(
-                scoped_db_on_legacy.get(&rtxn, None, "legacy_key2")?.as_deref(),
-                Some("legacy_value2_original")
-            );
-            assert_eq!(
-                scoped_db_on_legacy.get(&rtxn, None, "new_default_key1")?.as_deref(),
-                Some("new_default_value1")
-            );
-            let mut default_items: Vec<(String, String)> = scoped_db_on_legacy
-                .iter(&rtxn, None)?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            default_items.sort(); // Sort for consistent assertion
-            assert_eq!(default_items.len(), 3);
-            assert_eq!(
-                default_items,
-                vec![
-                    ("legacy_key1".to_string(), "legacy_value1_overwritten_by_scoped".to_string()),
-                    ("legacy_key2".to_string(), "legacy_value2_original".to_string()),
-                    ("new_default_key1".to_string(), "new_default_value1".to_string()),
-                ]
-            );
-
-            assert_eq!(
-                scoped_db_on_legacy
-                    .get(&rtxn, Some("brand_new_scope"), "new_scoped_key1")?
-                    .as_deref(),
-                Some("new_scoped_value1_in_brand_new")
-            );
-            let brand_new_items: Vec<(String, String)> = scoped_db_on_legacy
-                .iter(&rtxn, Some("brand_new_scope"))?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            assert_eq!(brand_new_items.len(), 1);
-
-            let initial_items: Vec<(String, String)> = scoped_db_on_legacy
-                .iter(&rtxn, Some("initial_scope_for_legacy_test"))?
-                .map(|res| res.map(|(k, v)| (k.to_string(), v.to_string())))
-                .collect::<Result<_, _>>()?;
-            assert_eq!(initial_items.len(), 0);
-        }
-        Ok(())
     }
 }

@@ -1,90 +1,75 @@
-use std::fs;
-use std::path::Path;
-
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedDatabase, ScopedDbError};
+use scoped_heed::scoped_database_options;
+use serde::{Serialize, Deserialize};
 
-fn main() -> Result<(), ScopedDbError> {
-    // Create a temporary database directory
-    let db_path = Path::new("./example_basic_db");
-    fs::create_dir_all(db_path)
-        .map_err(|e| ScopedDbError::InvalidInput(format!("Failed to create DB dir: {}", e)))?;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct User {
+    id: u64,
+    name: String,
+}
 
-    // Open the environment
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a temporary directory for the database
+    let db_path = "/tmp/scoped_heed_example";
+    if std::path::Path::new(db_path).exists() {
+        std::fs::remove_dir_all(db_path)?;
+    }
+    std::fs::create_dir_all(db_path)?;
+
+    // Initialize the environment
     let env = unsafe {
         EnvOpenOptions::new()
             .map_size(10 * 1024 * 1024) // 10MB
-            .max_dbs(3) // Minimum required for ScopedDatabase
+            .max_dbs(3)
             .open(db_path)?
     };
 
-    // Initialize the scoped database
-    let scoped_db = ScopedDatabase::new(&env)?;
-    println!("ScopedDatabase initialized");
+    // Create a database with String keys and User values using builder pattern
+    let mut wtxn = env.write_txn()?;
+    let db = scoped_database_options(&env)
+        .types::<String, User>()
+        .name("users")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
 
-    // Write data to different scopes
+    // Write some data
     {
         let mut wtxn = env.write_txn()?;
         
-        // Default scope (None)
-        scoped_db.put(&mut wtxn, None, "key1", "value1")?;
-        scoped_db.put(&mut wtxn, None, "key2", "value2")?;
+        // Default scope
+        let admin = User { id: 1, name: "Admin".to_string() };
+        db.put(&mut wtxn, None, &"admin".to_string(), &admin)?;
         
-        // Named scope
-        scoped_db.put(&mut wtxn, Some("tenant1"), "key1", "tenant1_value1")?;
-        scoped_db.put(&mut wtxn, Some("tenant1"), "key2", "tenant1_value2")?;
+        // Scoped data for tenant_a
+        let alice = User { id: 100, name: "Alice".to_string() };
+        db.put(&mut wtxn, Some("tenant_a"), &"user1".to_string(), &alice)?;
+        
+        // Scoped data for tenant_b  
+        let bob = User { id: 200, name: "Bob".to_string() };
+        db.put(&mut wtxn, Some("tenant_b"), &"user1".to_string(), &bob)?;
         
         wtxn.commit()?;
     }
 
-    // Read data from different scopes
+    // Read data back
     {
         let rtxn = env.read_txn()?;
         
         // Read from default scope
-        let value = scoped_db.get(&rtxn, None, "key1")?;
-        println!("Default scope - key1: {:?}", value);
+        let admin = db.get(&rtxn, None, &"admin".to_string())?;
+        println!("Default scope - admin: {:?}", admin);
         
-        // Read from named scope
-        let value = scoped_db.get(&rtxn, Some("tenant1"), "key1")?;
-        println!("Tenant1 scope - key1: {:?}", value);
+        // Read from tenant scopes
+        let tenant_a_user = db.get(&rtxn, Some("tenant_a"), &"user1".to_string())?;
+        let tenant_b_user = db.get(&rtxn, Some("tenant_b"), &"user1".to_string())?;
         
-        // Non-existent key returns None
-        let value = scoped_db.get(&rtxn, Some("tenant1"), "key3")?;
-        println!("Tenant1 scope - key3 (non-existent): {:?}", value);
+        println!("Tenant A - user1: {:?}", tenant_a_user);
+        println!("Tenant B - user1: {:?}", tenant_b_user);
     }
 
-    // Update existing value
-    {
-        let mut wtxn = env.write_txn()?;
-        scoped_db.put(&mut wtxn, None, "key1", "updated_value1")?;
-        wtxn.commit()?;
-    }
-
-    // Verify update
-    {
-        let rtxn = env.read_txn()?;
-        let value = scoped_db.get(&rtxn, None, "key1")?;
-        println!("Default scope - key1 (after update): {:?}", value);
-    }
-
-    // Delete key
-    {
-        let mut wtxn = env.write_txn()?;
-        let deleted = scoped_db.delete(&mut wtxn, None, "key2")?;
-        println!("Deleted key2 from default scope: {}", deleted);
-        
-        // Trying to delete non-existent key returns false
-        let deleted = scoped_db.delete(&mut wtxn, None, "key_not_exist")?;
-        println!("Deleted non-existent key: {}", deleted);
-        
-        wtxn.commit()?;
-    }
-
-    println!("Basic usage example completed successfully!");
-    
     // Clean up
-    let _ = fs::remove_dir_all(db_path);
-    
+    drop(env);
+    std::fs::remove_dir_all(db_path)?;
+
     Ok(())
 }
