@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2025-05-19
+
+### Changed
+- Pinned heed dependency to version 0.20.5 for stability and compatibility with dependent projects
+
 ## [0.1.0] - 2025-01-19
 
 ### Added
@@ -28,5 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for range queries within scopes
 - Clone trait implementations for all database types
 
-[Unreleased]: https://github.com/verse-pbc/scoped-heed/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/verse-pbc/scoped-heed/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/verse-pbc/scoped-heed/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/verse-pbc/scoped-heed/releases/tag/v0.1.0
