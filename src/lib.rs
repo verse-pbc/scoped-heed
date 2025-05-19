@@ -52,6 +52,79 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Database Types
+//!
+//! The library provides three database implementations optimized for different use cases:
+//!
+//! 1. **Generic Database** (`ScopedDatabase<K, V>`)
+//!    - Supports any Serde-compatible types for keys and values
+//!    - Most flexible option
+//!    - Suitable for complex data structures
+//!
+//! 2. **Bytes Key Database** (`ScopedBytesKeyDatabase<V>`)
+//!    - Uses raw byte slices for keys, serialized values
+//!    - Optimized for byte-based keys (hashes, IDs)
+//!    - ~38x faster key decoding than generic version
+//!
+//! 3. **Raw Bytes Database** (`ScopedBytesDatabase`)
+//!    - Both keys and values are raw bytes
+//!    - Maximum performance with zero serialization
+//!    - ~1.8x faster writes than generic version
+//!
+//! ## Key Encoding
+//!
+//! Scoped entries use a 32-bit hash prefix for efficient scope identification:
+//! - Default scope: keys are stored as-is
+//! - Named scopes: `[scope_hash: 4 bytes][original_key_data]`
+//!
+//! ## Usage Patterns
+//!
+//! ### Multi-tenant Application
+//!
+//! ```rust,no_run
+//! # use scoped_heed::{scoped_database_options, ScopedDbError};
+//! # use heed::EnvOpenOptions;
+//! # fn main() -> Result<(), ScopedDbError> {
+//! # let env = unsafe { EnvOpenOptions::new().map_size(10*1024*1024).max_dbs(3).open("./db")? };
+//! # let mut wtxn = env.write_txn()?;
+//! let tenant_db = scoped_database_options(&env)
+//!     .types::<String, String>()
+//!     .name("tenants")
+//!     .create(&mut wtxn)?;
+//! # wtxn.commit()?;
+//!
+//! // Each tenant gets isolated data
+//! # let mut wtxn = env.write_txn()?;
+//! tenant_db.put(&mut wtxn, Some("acme-corp"), &"settings".to_string(), &"data1".to_string())?;
+//! tenant_db.put(&mut wtxn, Some("big-tech"), &"settings".to_string(), &"data2".to_string())?;
+//! # wtxn.commit()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Performance-Critical Applications
+//!
+//! ```rust,no_run
+//! # use scoped_heed::{scoped_database_options, ScopedDbError};
+//! # use heed::EnvOpenOptions;
+//! # fn main() -> Result<(), ScopedDbError> {
+//! # let env = unsafe { EnvOpenOptions::new().map_size(10*1024*1024).max_dbs(3).open("./db")? };
+//! # let mut wtxn = env.write_txn()?;
+//! // Use byte keys for maximum performance
+//! let cache_db = scoped_database_options(&env)
+//!     .raw_bytes()
+//!     .name("cache")
+//!     .create(&mut wtxn)?;
+//! # wtxn.commit()?;
+//!
+//! // Zero-copy operations
+//! # let mut wtxn = env.write_txn()?;
+//! cache_db.put(&mut wtxn, Some("session"), b"key123", b"session_data")?;
+//! # wtxn.commit()?;
+//! # Ok(())
+//! # }
+//! ```
 
 use heed::Database as HeedDatabase;
 use heed::types::{Bytes, SerdeBincode};
@@ -509,8 +582,8 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            db_scoped: self.db_scoped.clone(),
-            db_default: self.db_default.clone(),
+            db_scoped: self.db_scoped,
+            db_default: self.db_default,
             scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
             _phantom: PhantomData,
         }
@@ -1019,8 +1092,8 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            db_scoped: self.db_scoped.clone(),
-            db_default: self.db_default.clone(),
+            db_scoped: self.db_scoped,
+            db_default: self.db_default,
             scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
             _phantom: PhantomData,
         }
@@ -1282,8 +1355,8 @@ impl ScopedBytesDatabase {
 impl Clone for ScopedBytesDatabase {
     fn clone(&self) -> Self {
         Self {
-            db_scoped: self.db_scoped.clone(),
-            db_default: self.db_default.clone(),
+            db_scoped: self.db_scoped,
+            db_default: self.db_default,
             scope_hasher: RwLock::new(ScopeHasher::new()), // Create fresh hasher
         }
     }

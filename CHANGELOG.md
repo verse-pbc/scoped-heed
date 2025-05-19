@@ -1,0 +1,32 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2025-01-19
+
+### Added
+- Initial release of scoped-heed
+- Redis-like database isolation for LMDB via heed
+- Completely isolated scopes within a single environment
+- Support for generic key/value types with SerdeBincode
+- Optimized implementations for byte keys and raw bytes
+- Comprehensive examples demonstrating various use cases
+- Full test coverage for scope isolation
+- Benchmarks comparing performance of different implementations
+
+### Features
+- `ScopedDatabase<K, V>` - Generic typed database with serialized keys and values
+- `ScopedBytesKeyDatabase<V>` - Performance-optimized database with byte keys
+- `ScopedBytesDatabase` - Fully-optimized database with raw byte keys and values
+- Hash-based scope encoding for efficient lookups
+- Builder pattern for easy database configuration
+- Support for range queries within scopes
+- Clone trait implementations for all database types
+
+[Unreleased]: https://github.com/verse-pbc/scoped-heed/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/verse-pbc/scoped-heed/releases/tag/v0.1.0

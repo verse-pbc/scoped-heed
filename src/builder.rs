@@ -1,6 +1,6 @@
-use crate::{ScopedDatabase, ScopedBytesKeyDatabase, ScopedBytesDatabase, ScopedDbError};
+use crate::{ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase, ScopedDbError};
 use heed::{Env, RwTxn};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 /// Builder for creating scoped databases with flexible type configurations
@@ -13,10 +13,10 @@ impl<'env> ScopedDatabaseOptions<'env> {
     pub fn new(env: &'env Env) -> Self {
         Self { env }
     }
-    
+
     /// Configure database with generic key and value types using SerdeBincode
     /// Keys and values are serialized using bincode
-    pub fn types<K, V>(self) -> TypedOptions<'env, K, V> 
+    pub fn types<K, V>(self) -> TypedOptions<'env, K, V>
     where
         K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
         V: Serialize + for<'de> Deserialize<'de> + 'static,
@@ -27,7 +27,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
             _phantom: PhantomData,
         }
     }
-    
+
     /// Configure database with raw byte slice keys (&[u8]) and serialized values
     /// Keys are stored as-is without serialization, values use bincode
     pub fn bytes_keys<V>(self) -> BytesKeysOptions<'env, V>
@@ -40,7 +40,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
             _phantom: PhantomData,
         }
     }
-    
+
     /// Configure database with raw byte slice keys and values (no serialization)
     /// Both keys and values are stored as raw bytes without any encoding
     pub fn raw_bytes(self) -> RawBytesOptions<'env> {
@@ -58,7 +58,7 @@ pub struct TypedOptions<'env, K, V> {
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<'env, K, V> TypedOptions<'env, K, V>
+impl<K, V> TypedOptions<'_, K, V>
 where
     K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
     V: Serialize + for<'de> Deserialize<'de> + 'static,
@@ -68,13 +68,13 @@ where
         self.name = Some(name.to_string());
         self
     }
-    
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedDatabase<K, V>, ScopedDbError> {
-        let name = self.name.ok_or_else(|| 
-            ScopedDbError::InvalidInput("Database name is required".into())
-        )?;
-        
+        let name = self
+            .name
+            .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
+
         ScopedDatabase::create(self.env, &name, txn)
     }
 }
@@ -86,7 +86,7 @@ pub struct BytesKeysOptions<'env, V> {
     _phantom: PhantomData<V>,
 }
 
-impl<'env, V> BytesKeysOptions<'env, V>
+impl<V> BytesKeysOptions<'_, V>
 where
     V: Serialize + for<'de> Deserialize<'de> + 'static,
 {
@@ -95,13 +95,13 @@ where
         self.name = Some(name.to_string());
         self
     }
-    
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedBytesKeyDatabase<V>, ScopedDbError> {
-        let name = self.name.ok_or_else(|| 
-            ScopedDbError::InvalidInput("Database name is required".into())
-        )?;
-        
+        let name = self
+            .name
+            .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
+
         ScopedBytesKeyDatabase::create(self.env, &name, txn)
     }
 }
@@ -112,19 +112,19 @@ pub struct RawBytesOptions<'env> {
     name: Option<String>,
 }
 
-impl<'env> RawBytesOptions<'env> {
+impl RawBytesOptions<'_> {
     /// Set the database name
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
-    
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedBytesDatabase, ScopedDbError> {
-        let name = self.name.ok_or_else(|| 
-            ScopedDbError::InvalidInput("Database name is required".into())
-        )?;
-        
+        let name = self
+            .name
+            .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
+
         ScopedBytesDatabase::create(self.env, &name, txn)
     }
 }

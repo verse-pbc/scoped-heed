@@ -1,97 +1,70 @@
 # scoped-heed
 
-A Rust library that adds Redis-like database isolation to the heed LMDB wrapper, providing isolated scopes (similar to Redis databases) within a single LMDB environment.
+[![crates.io](https://img.shields.io/crates/v/scoped-heed.svg)](https://crates.io/crates/scoped-heed)
+[![docs.rs](https://docs.rs/scoped-heed/badge.svg)](https://docs.rs/scoped-heed)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+
+Namespace isolation for the heed LMDB wrapper. Provides multiple logical databases within a single LMDB environment.
 
 ## Features
 
-- 🏗️ **Redis-like Database Isolation**: Each scope acts as an isolated database, similar to Redis's database numbers
-- 🔒 **Complete Scope Isolation**: Scopes are completely isolated from each other - no cross-scope queries or operations
-- 🏷️ **Default Scope Support**: Maintains compatibility with standard heed databases
-- 📦 **Generic Key/Value Types**: Use any type that implements Serialize/Deserialize
-- ⚡ **Efficient Scope Operations**: Native range queries and bulk operations within a scope
-- 🔄 **Seamless Integration**: Drop-in compatibility with existing heed environments
-- 🛡️ **Type-safe API**: Leverage Rust's type system for compile-time guarantees
-- 🔐 **Hash-based Scoping**: Uses 32-bit hashes for efficient scope identification
+- **Scope Isolation**: Each scope acts as an isolated namespace with no cross-scope access
+- **Default Scope**: Compatible with standard heed databases
+- **Generic Types**: Supports any Serde-compatible types
+- **Range Queries**: Efficient iteration within scopes
+- **Hash-based Keys**: Uses 32-bit hashes for scope identification
 
 ## Design
 
-The library provides three main database implementations:
+The library provides three database implementations:
 
-1. **Generic `ScopedDatabase<K, V>`**: Uses `SerdeBincode` for both keys and values (most flexible)
-2. **Performance-optimized `ScopedBytesKeyDatabase<V>`**: Uses native byte slices for keys, generic values
-3. **Fully-optimized `ScopedBytesDatabase`**: Uses native byte slices for both keys and values
+1. **`ScopedDatabase<K, V>`**: Serialized keys and values (using SerdeBincode)
+2. **`ScopedBytesKeyDatabase<V>`**: Byte slice keys, serialized values
+3. **`ScopedBytesDatabase`**: Raw byte slices for both keys and values
 
-### Scope Isolation Model
+### Scope Isolation
 
-Think of scopes as completely isolated databases, similar to Redis's database model:
-- Each scope is a separate logical database within the same LMDB environment
-- Operations are confined to a single scope - no cross-scope queries or transactions
-- Keys can be identical across different scopes without collision
-- Clearing a scope only affects that specific scope's data
+Scopes work like separate databases:
+- Each scope is isolated within the same LMDB environment
+- No cross-scope queries or operations
+- Keys can be identical across different scopes
+- Clearing a scope only affects that scope
 
-This design is ideal for:
-- Multi-tenant applications where each tenant needs isolated data
-- Test isolation where each test uses its own scope
-- Modular systems where different components manage their own data
+Use cases:
+- Multi-tenant applications
+- Test isolation
+- Component separation
 
-### How It Works
+### Implementation
 
-All scoped entries have their keys internally prefixed with a 32-bit hash of the scope name. This ensures:
-- Complete data isolation between scopes
-- Efficient operations within a single scope
-- No key collisions between scopes
-- Native range query support per scope
-
-#### Key Encoding
-
-For scoped entries, the actual key stored in LMDB is structured as:
+Scoped entries have keys prefixed with a 32-bit hash of the scope name:
 ```
 [scope_hash: 4 bytes][original_key_data]
 ```
 
-Where:
-- `scope_hash`: 32-bit hash of the scope name (little-endian)
-- `original_key_data`: Your actual key, encoded based on the database type
+### Database Types
 
-Example:
-- Scope: `"tenant1"` → hash: `0x12AB34CD`
-- User key: `"user123"`
-- Stored key: `[0xCD, 0x34, 0xAB, 0x12][encoded "user123"]`
+**Serialized Types** (`.types::<K,V>()`):
+- Keys and values are serialized using bincode
+- Supports any Serde-compatible type
 
-#### Database Types
+**Byte Keys** (`.bytes_keys::<V>()`):
+- Keys are raw `&[u8]`, values are serialized
+- Better performance for byte-based keys
 
-The builder pattern provides three configuration options:
-
-1. **Serialized Types** (`.types::<K,V>()`):
-   - Keys and values are serialized using bincode
-   - Scoped key format: `[scope_hash: 4 bytes][bincode(key)]`
-   - Most flexible, supports any Serde-compatible type
-
-2. **Byte Keys** (`.bytes_keys::<V>()`):
-   - Keys are raw `&[u8]`, values are serialized
-   - Scoped key format: `[scope_hash: 4 bytes][key_length: 8 bytes][key_bytes]`
-   - Optimized for byte-based keys like hashes or IDs
-
-3. **Raw Bytes** (`.raw_bytes()`):
-   - Both keys and values are raw `&[u8]`
-   - Scoped key format: `[scope_hash: 4 bytes][key_length: 8 bytes][key_bytes]`
-   - Maximum performance, no serialization overhead
+**Raw Bytes** (`.raw_bytes()`):
+- Both keys and values are raw `&[u8]`
+- No serialization overhead
 
 ### Database Naming
 
-When creating a ScopedDatabase, you provide a base name that is used to create two internal databases:
+Each ScopedDatabase creates two internal databases:
 - `{name}_default` - For unscoped data
 - `{name}_scoped` - For scoped data
 
-For example, `ScopedDatabase::new(&env, "users")` creates:
-- `users_default` - Stores data without scopes
-- `users_scoped` - Stores data with scope prefixes
-
-This allows multiple ScopedDatabase instances to coexist in the same environment without conflicts.
-
 ## Usage
 
-### Using the Builder Pattern
+### Basic Example
 
 ```rust
 use scoped_heed::{scoped_database_options, ScopedDbError};
@@ -107,318 +80,78 @@ fn main() -> Result<(), ScopedDbError> {
 
     let mut txn = env.write_txn()?;
     
-    // Create a database with String keys and String values
+    // Create database with String keys and values
     let db = scoped_database_options(&env)
         .types::<String, String>()
         .name("config")
         .create(&mut txn)?;
     
-    // Default scope - key stored as-is
+    // Default scope
     db.put(&mut txn, None, &"key1".to_string(), &"value1".to_string())?;
     
-    // Named scope - key prefixed with 32-bit hash of "tenant1"
+    // Named scope
     db.put(&mut txn, Some("tenant1"), &"key1".to_string(), &"tenant1_value1".to_string())?;
     
     txn.commit()?;
-
-    // Read values
-    let rtxn = env.read_txn()?;
-    let default_value = db.get(&rtxn, None, &"key1".to_string())?;
-    let scoped_value = db.get(&rtxn, Some("tenant1"), &"key1".to_string())?;
-    
     Ok(())
 }
 ```
 
-### Performance-Optimized Bytes Database
+### Byte Keys Example
 
 ```rust
-use scoped_heed::{scoped_database_options, ScopedDbError};
-use heed::EnvOpenOptions;
-use serde::{Serialize, Deserialize};
+// Database with byte keys and values
+let db = scoped_database_options(&env)
+    .raw_bytes()
+    .name("cache")
+    .create(&mut txn)?;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct GameData {
-    score: u32,
-    level: u8,
-}
-
-fn main() -> Result<(), ScopedDbError> {
-    let env = unsafe {
-        EnvOpenOptions::new()
-            .map_size(10 * 1024 * 1024)
-            .max_dbs(4)
-            .open("./db")?
-    };
-    
-    let mut txn = env.write_txn()?;
-    
-    // Database with byte keys and serialized values
-    let db = scoped_database_options(&env)
-        .bytes_keys::<GameData>()
-        .name("game")
-        .create(&mut txn)?;
-    
-    // Keys are raw bytes, values are serialized
-    let data = GameData { score: 1500, level: 5 };
-    
-    // Default scope - key stored as-is: b"player1"
-    db.put(&mut txn, None, b"player1", &data)?;
-    
-    // Scoped - key stored as: [hash("tournament1")][8 bytes length][b"player1"]
-    db.put(&mut txn, Some("tournament1"), b"player1", &data)?;
-    
-    txn.commit()?;
-    
-    // Zero-copy key access
-    let rtxn = env.read_txn()?;
-    let result = db.get(&rtxn, Some("tournament1"), b"player1")?;
-    
-    Ok(())
-}
+// No serialization overhead
+db.put(&mut txn, Some("cache"), b"session_123", b"user_data")?;
 ```
 
-### Fully-Optimized Bytes Database
+### Multi-tenant Example
 
 ```rust
-use scoped_heed::{scoped_database_options, ScopedDbError};
-use heed::EnvOpenOptions;
+// Each tenant's data is isolated
+db.put(&mut txn, Some("tenant_a"), &"config", &"settings_a")?;
+db.put(&mut txn, Some("tenant_b"), &"config", &"settings_b")?;
 
-fn main() -> Result<(), ScopedDbError> {
-    let env = unsafe {
-        EnvOpenOptions::new()
-            .map_size(10 * 1024 * 1024)
-            .max_dbs(4)
-            .open("./db")?
-    };
-    
-    let mut txn = env.write_txn()?;
-    
-    // Database with raw byte keys and values (no serialization)
-    let db = scoped_database_options(&env)
-        .raw_bytes()
-        .name("cache")
-        .create(&mut txn)?;
-    
-    // Direct byte operations with zero overhead
-    // Default scope - key stored as-is: b"key1"
-    db.put(&mut txn, None, b"key1", b"value1")?;
-    
-    // Scoped - key stored as: [hash("cache")][8 bytes length][b"session_123"]
-    db.put(&mut txn, Some("cache"), b"session_123", b"user_data")?;
-    
-    txn.commit()?;
-    
-    // Zero-copy reads for both keys and values
-    let rtxn = env.read_txn()?;
-    let value: Option<&[u8]> = db.get(&rtxn, Some("cache"), b"session_123")?;
-    
-    Ok(())
-}
+// Same key, different scopes, different values
+let a = db.get(&rtxn, Some("tenant_a"), &"config")?; // "settings_a"
+let b = db.get(&rtxn, Some("tenant_b"), &"config")?; // "settings_b"
 ```
-
-### Custom Types with Serde
-
-```rust
-use scoped_heed::{scoped_database_options, ScopedDbError};
-use serde::{Serialize, Deserialize};
-use heed::EnvOpenOptions;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UserKey {
-    user_id: u64,
-    field: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct UserData {
-    name: String,
-    age: u32,
-}
-
-fn main() -> Result<(), ScopedDbError> {
-    let env = unsafe {
-        EnvOpenOptions::new()
-            .map_size(10 * 1024 * 1024)
-            .max_dbs(4)
-            .open("./db")?
-    };
-    
-    let mut txn = env.write_txn()?;
-    
-    // Database with custom types
-    let db = scoped_database_options(&env)
-        .types::<UserKey, UserData>()
-        .name("users")
-        .create(&mut txn)?;
-    
-    let key = UserKey {
-        user_id: 12345,
-        field: "profile".to_string(),
-    };
-    
-    let data = UserData {
-        name: "Alice".to_string(),
-        age: 30,
-    };
-    
-    // Scoped key stored as: [hash("org1")][bincode(UserKey)]
-    db.put(&mut txn, Some("org1"), &key, &data)?;
-    txn.commit()?;
-    
-    Ok(())
-}
-```
-
-## API Traits
-
-All database types implement common Rust traits for better usability:
-- `Debug` - For debugging and logging
-- `Clone` - For copying database handles (creates a fresh scope hasher)
-
-Note: When cloning a database, the new instance gets its own scope hasher to avoid concurrent access issues with the `RwLock`.
-
-## Internal Representation
-
-The library uses different encoding strategies for optimal performance:
-
-### Generic Database
-```rust
-// For scoped entries with SerdeBincode:
-SerdeBincode<ScopedKey<K>> where ScopedKey = { scope_hash: u32, key: K }
-
-// Encoded as: [bincode serialization of the struct]
-```
-
-### Optimized Bytes Database  
-```rust
-// For scoped entries with manual encoding:
-[scope_hash: u32_le][key_length: u64_le][key_bytes: &[u8]]
-
-// Example: scope_hash=0x12345678, key=b"test"
-// Bytes: [0x78, 0x56, 0x34, 0x12, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74]
-```
-
-The manual encoding produces byte-for-byte identical output to the bincode version for compatibility.
-
-## Performance Considerations
-
-Choose the right implementation based on your use case:
-
-### Use `ScopedDatabase<K,V>` when:
-- You need complex key types (structs, enums)
-- Keys are variable-length strings
-- Development convenience is prioritized
-- Serialization overhead is acceptable
-
-### Use `ScopedBytesKeyDatabase<V>` when:
-- Keys are byte sequences (hashes, IDs)
-- Performance is critical
-- You want to avoid allocations
-- Key operations are in hot paths
-
-Based on benchmarks, performance comparison:
-
-### `ScopedBytesKeyDatabase<V>` vs `ScopedDatabase<K,V>`:
-- **1.0x** write operations (similar performance)
-- **1.1x faster** read operations
-- **2.5x faster** key encoding
-- **38x faster** key decoding
-
-### `ScopedBytesDatabase` (pure bytes) vs `ScopedDatabase<K,V>`:
-- **1.8x faster** write operations
-- **1.3x faster** read operations
-- Zero serialization overhead for both keys and values
-
-Performance gains come from:
-- No Serde serialization overhead
-- Zero allocations for fixed-size keys
-- Direct memory operations
-- Optimized codec implementation
 
 ## Database Operations
 
-All database types support the following operations:
-
-### Basic Operations
 ```rust
-// Insert a key-value pair
+// Basic operations
 db.put(&mut wtxn, Some("scope"), &key, &value)?;
-
-// Retrieve a value
 let value = db.get(&rtxn, Some("scope"), &key)?;
-
-// Delete a key-value pair
-let was_deleted = db.delete(&mut wtxn, Some("scope"), &key)?;
-
-// Clear all entries in a scope
+db.delete(&mut wtxn, Some("scope"), &key)?;
 db.clear(&mut wtxn, Some("scope"))?;
 
-// Iterate over entries in a scope
+// Iteration
 for result in db.iter(&rtxn, Some("scope"))? {
     let (key, value) = result?;
-    // Process key-value pair
 }
 ```
 
-All operations work with both scoped (`Some("scope_name")`) and default (`None`) databases.
 
-## Multi-tenant Example
+## Performance
 
-```rust
-use scoped_heed::{scoped_database_options, ScopedDbError};
+- **Generic database**: Most flexible, uses serialization
+- **Byte keys database**: Faster key operations (~38x faster decoding)
+- **Raw bytes database**: Fastest, no serialization overhead
 
-fn main() -> Result<(), ScopedDbError> {
-    let env = /* setup environment */;
-    
-    let mut wtxn = env.write_txn()?;
-    let db = scoped_database_options(&env)
-        .types::<String, String>()
-        .name("tenants")
-        .create(&mut wtxn)?;
-    wtxn.commit()?;
-    
-    let mut wtxn = env.write_txn()?;
-    
-    // Each tenant gets their own scope
-    db.put(&mut wtxn, Some("tenant1"), &"config".to_string(), &"value1".to_string())?;
-    db.put(&mut wtxn, Some("tenant2"), &"config".to_string(), &"value2".to_string())?;
-    
-    // Global data in default scope
-    db.put(&mut wtxn, None, &"system".to_string(), &"global".to_string())?;
-    
-    wtxn.commit()?;
-    
-    // Iterate over a specific tenant's data
-    let rtxn = env.read_txn()?;
-    for result in db.iter(&rtxn, Some("tenant1"))? {
-        let (key, value) = result?;
-        println!("Tenant1: {} = {}", key, value);
-    }
-    
-    // Clean up tenant1's data
-    let mut wtxn = env.write_txn()?;
-    db.clear(&mut wtxn, Some("tenant1"))?;
-    wtxn.commit()?;
-    
-    Ok(())
-}
-```
 
 ## Error Handling
 
-The library provides a custom error type `ScopedDbError`:
+`ScopedDbError` wraps heed errors and adds:
+- `EmptyScopeDisallowed`: Empty strings not allowed as scope names
+- `InvalidInput`: Input validation errors
 
-```rust
-pub enum ScopedDbError {
-    Heed(heed::Error),
-    EmptyScopeDisallowed,
-    InvalidInput(String),
-    Encoding(String),
-}
-```
-
-Note: Empty strings are not allowed as scope names - use `None` for the default scope.
+Use `None` for the default scope, not empty strings.
 
 ## Installation
 
@@ -431,46 +164,14 @@ scoped-heed = "0.1.0"
 
 ## Examples
 
-The repository includes several examples:
-
-- `basic_usage` - Simple key-value operations with generic types
-- `bytes_optimization` - Demonstrates the performance-optimized bytes implementation
-- `pure_bytes` - Shows the fully-optimized bytes-only database
-
 Run examples with:
 
 ```bash
 cargo run --example basic_usage
+cargo run --example multi_tenant
 cargo run --example bytes_optimization
-cargo run --example pure_bytes
 ```
-
-## Benchmarks
-
-Performance benchmarks are included to compare all three implementations:
-
-```bash
-cargo bench
-```
-
-The benchmarks measure:
-- Full database write/read operations 
-- Key encoding/decoding in isolation
-- Real-world performance differences
-
-View detailed results in `target/criterion/report/index.html` after running.
-
-## Implementation Notes
-
-- Generic version uses heed's native `SerdeBincode` for tuple serialization
-- Bytes version implements custom `BytesEncode`/`BytesDecode` for optimal performance
-- Scope hashes are 32-bit for minimal overhead (4 bytes per scoped entry)
-- Both implementations produce identical binary layouts
-- Compatible with all Serde-supported types (for values)
-- Thread-safe scope hasher with collision detection
-- Configurable database naming prevents conflicts in shared environments
-- All database types implement `Debug` and `Clone` for easy debugging and testing
 
 ## License
 
-[MIT License](LICENSE)
+MIT OR Apache-2.0
