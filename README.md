@@ -13,6 +13,8 @@ Namespace isolation for the heed LMDB wrapper. Provides multiple logical databas
 - **Generic Types**: Supports any Serde-compatible types
 - **Range Queries**: Efficient iteration within scopes
 - **Hash-based Keys**: Uses 32-bit hashes for scope identification
+- **Global Registry**: Centralized metadata management for scopes
+- **Safe Pruning**: Cross-database scope emptiness checking
 
 ## Design
 
@@ -67,30 +69,41 @@ Each ScopedDatabase creates two internal databases:
 ### Basic Example
 
 ```rust
-use scoped_heed::{scoped_database_options, ScopedDbError};
+use scoped_heed::{scoped_database_options, ScopedDbError, Scope, GlobalScopeRegistry};
 use heed::EnvOpenOptions;
+use std::sync::Arc;
 
 fn main() -> Result<(), ScopedDbError> {
     let env = unsafe {
         EnvOpenOptions::new()
             .map_size(10 * 1024 * 1024)
-            .max_dbs(4)
+            .max_dbs(5) // Need an extra db for global registry
             .open("./db")?
     };
 
+    // Create global registry
+    let mut txn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut txn)?);
+    txn.commit()?;
+    
     let mut txn = env.write_txn()?;
     
     // Create database with String keys and values
     let db = scoped_database_options(&env)
+        .with_registry(registry.clone())
         .types::<String, String>()
         .name("config")
         .create(&mut txn)?;
     
     // Default scope
-    db.put(&mut txn, None, &"key1".to_string(), &"value1".to_string())?;
+    db.put(&mut txn, &Scope::Default, &"key1".to_string(), &"value1".to_string())?;
     
-    // Named scope
-    db.put(&mut txn, Some("tenant1"), &"key1".to_string(), &"tenant1_value1".to_string())?;
+    // Named scope using Scope enum
+    let tenant_scope = Scope::named("tenant1")?;
+    db.put(&mut txn, &tenant_scope, &"key1".to_string(), &"tenant1_value1".to_string())?;
+    
+    // Or use the convenience method with string
+    db.put_with_name(&mut txn, "tenant2", &"key1".to_string(), &"tenant2_value1".to_string())?;
     
     txn.commit()?;
     Ok(())
@@ -102,39 +115,51 @@ fn main() -> Result<(), ScopedDbError> {
 ```rust
 // Database with byte keys and values
 let db = scoped_database_options(&env)
+    .with_registry(registry.clone())
     .raw_bytes()
     .name("cache")
     .create(&mut txn)?;
 
-// No serialization overhead
-db.put(&mut txn, Some("cache"), b"session_123", b"user_data")?;
+// No serialization overhead - use with_name convenience method
+db.put_with_name(&mut txn, "cache", b"session_123", b"user_data")?;
 ```
 
 ### Multi-tenant Example
 
 ```rust
 // Each tenant's data is isolated
-db.put(&mut txn, Some("tenant_a"), &"config", &"settings_a")?;
-db.put(&mut txn, Some("tenant_b"), &"config", &"settings_b")?;
+db.put_with_name(&mut txn, "tenant_a", &"config", &"settings_a")?;
+db.put_with_name(&mut txn, "tenant_b", &"config", &"settings_b")?;
 
 // Same key, different scopes, different values
-let a = db.get(&rtxn, Some("tenant_a"), &"config")?; // "settings_a"
-let b = db.get(&rtxn, Some("tenant_b"), &"config")?; // "settings_b"
+let a = db.get_with_name(&rtxn, "tenant_a", &"config")?; // "settings_a"
+let b = db.get_with_name(&rtxn, "tenant_b", &"config")?; // "settings_b"
 ```
 
 ## Database Operations
 
 ```rust
-// Basic operations
-db.put(&mut wtxn, Some("scope"), &key, &value)?;
-let value = db.get(&rtxn, Some("scope"), &key)?;
-db.delete(&mut wtxn, Some("scope"), &key)?;
-db.clear(&mut wtxn, Some("scope"))?;
+// Basic operations with Scope enum
+let scope = Scope::named("scope")?;
+db.put(&mut wtxn, &scope, &key, &value)?;
+let value = db.get(&rtxn, &scope, &key)?;
+db.delete(&mut wtxn, &scope, &key)?;
+db.clear(&mut wtxn, &scope)?;
+
+// Simpler operations with string convenience methods
+db.put_with_name(&mut wtxn, "scope", &key, &value)?;
+let value = db.get_with_name(&rtxn, "scope", &key)?;
+db.delete_with_name(&mut wtxn, "scope", &key)?;
+db.clear_with_name(&mut wtxn, "scope")?;
 
 // Iteration
-for result in db.iter(&rtxn, Some("scope"))? {
+for result in db.iter(&rtxn, &scope)? {
     let (key, value) = result?;
 }
+
+// Find and prune empty scopes globally
+let databases: [&dyn ScopeEmptinessChecker; 2] = [&users_db, &products_db];
+let pruned_count = registry.prune_globally_unused_scopes(&mut wtxn, &databases)?;
 ```
 
 
@@ -159,7 +184,14 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-scoped-heed = "0.1.0"
+scoped-heed = "0.2.0-alpha.1"
+```
+
+For stable API, use the latest stable version:
+
+```toml
+[dependencies]
+scoped-heed = "0.1.1"
 ```
 
 ## Examples

@@ -1,5 +1,6 @@
 use heed::EnvOpenOptions;
-use scoped_heed::ScopedBytesDatabase;
+use scoped_heed::{Scope, ScopedBytesDatabase, GlobalScopeRegistry};
+use std::sync::Arc;
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -14,8 +15,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .open(db_path.path())?
     };
 
+    // Create a global registry
+    let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+
     // Create a scoped database
-    let db = ScopedBytesDatabase::new(&env, "test")?;
+    let db = ScopedBytesDatabase::new(&env, "test", registry.clone())?;
+    
+    // Create a scope
+    let scope1 = Scope::named("scope1")?;
 
     // Test with write transaction
     {
@@ -23,8 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut wtxn = env.write_txn()?;
 
         // These calls should now work with generic transaction types
-        db.put(&mut wtxn, Some("scope1"), b"key1", b"value1")?;
-        db.put(&mut wtxn, None, b"key2", b"value2")?;
+        db.put(&mut wtxn, &scope1, b"key1", b"value1")?;
+        db.put(&mut wtxn, &Scope::Default, b"key2", b"value2")?;
 
         wtxn.commit()?;
     }
@@ -35,8 +44,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let rtxn = env.read_txn()?;
 
         // These calls should now work with generic transaction types
-        let val1 = db.get(&rtxn, Some("scope1"), b"key1")?;
-        let val2 = db.get(&rtxn, None, b"key2")?;
+        let val1 = db.get(&rtxn, &scope1, b"key1")?;
+        let val2 = db.get(&rtxn, &Scope::Default, b"key2")?;
 
         assert_eq!(val1, Some(&b"value1"[..]));
         assert_eq!(val2, Some(&b"value2"[..]));
@@ -50,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let rtxn = env.read_txn()?;
 
         println!("\nIterating over scope1:");
-        for result in db.iter(&rtxn, Some("scope1"))? {
+        for result in db.iter(&rtxn, &scope1)? {
             let (key, value) = result?;
             println!(
                 "Key: {:?}, Value: {:?}",
@@ -60,7 +69,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         println!("\nIterating over default scope:");
-        for result in db.iter(&rtxn, None)? {
+        for result in db.iter(&rtxn, &Scope::Default)? {
             let (key, value) = result?;
             println!(
                 "Key: {:?}, Value: {:?}",
@@ -76,7 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         println!("\nRange query in scope1:");
         let range = b"k".as_slice()..b"l".as_slice();
-        for result in db.range(&rtxn, Some("scope1"), &range)? {
+        for result in db.range(&rtxn, &scope1, &range)? {
             let (key, value) = result?;
             println!(
                 "Key: {:?}, Value: {:?}",

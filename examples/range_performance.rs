@@ -1,5 +1,6 @@
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedDbError, scoped_database_options};
+use scoped_heed::{Scope, ScopedDbError, scoped_database_options, GlobalScopeRegistry};
+use std::sync::Arc;
 use std::time::Instant;
 
 fn main() -> Result<(), ScopedDbError> {
@@ -17,9 +18,14 @@ fn main() -> Result<(), ScopedDbError> {
             .open(db_path)?
     };
 
+    // Create a global registry
+    let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+
     // Create a scoped bytes database
     let mut wtxn = env.write_txn()?;
-    let bytes_db = scoped_database_options(&env)
+    let bytes_db = scoped_database_options(&env, registry.clone())
         .bytes_keys::<String>()
         .name("perf_test")
         .create(&mut wtxn)?;
@@ -31,10 +37,11 @@ fn main() -> Result<(), ScopedDbError> {
     // Insert data in multiple scopes
     for scope_id in 0..10 {
         let scope_name = format!("scope{}", scope_id);
+        let scope = Scope::named(&scope_name)?;
         for i in 0..1000 {
             let key = format!("key{:06}", i).into_bytes();
             let value = format!("value_{}_{}", scope_id, i);
-            bytes_db.put(&mut wtxn, Some(&scope_name), &key, &value)?;
+            bytes_db.put(&mut wtxn, &scope, &key, &value)?;
         }
     }
 
@@ -42,7 +49,7 @@ fn main() -> Result<(), ScopedDbError> {
     for i in 0..1000 {
         let key = format!("key{:06}", i).into_bytes();
         let value = format!("default_value_{}", i);
-        bytes_db.put(&mut wtxn, None, &key, &value)?;
+        bytes_db.put(&mut wtxn, &Scope::Default, &key, &value)?;
     }
 
     wtxn.commit()?;
@@ -57,10 +64,13 @@ fn main() -> Result<(), ScopedDbError> {
 
     println!("Starting range query test...");
 
+    // Create scope object
+    let scope5 = Scope::named("scope5")?;
+
     // Time the range query
     let start_time = Instant::now();
     let mut count = 0;
-    for result in bytes_db.range(&rtxn, Some("scope5"), &range)? {
+    for result in bytes_db.range(&rtxn, &scope5, &range)? {
         let (_key, _value) = result?;
         count += 1;
     }
@@ -72,7 +82,7 @@ fn main() -> Result<(), ScopedDbError> {
     // Compare with full scan (what the old implementation would do)
     let start_time = Instant::now();
     let mut count = 0;
-    for result in bytes_db.iter(&rtxn, Some("scope5"))? {
+    for result in bytes_db.iter(&rtxn, &scope5)? {
         let (key, _value) = result?;
         if key >= start_key && key <= end_key {
             count += 1;

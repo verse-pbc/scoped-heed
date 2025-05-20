@@ -1,5 +1,6 @@
 use heed::EnvOpenOptions;
-use scoped_heed::scoped_database_options;
+use scoped_heed::{scoped_database_options, Scope, GlobalScopeRegistry};
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,11 +26,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open(db_path)?
     };
 
+    // Create a global registry
+    let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+
     // Test generic database with Vec<u8> keys
     println!("=== Performance Comparison with Scope Isolation ===\n");
 
     let mut wtxn = env.write_txn()?;
-    let generic_db = scoped_database_options(&env)
+    let generic_db = scoped_database_options(&env, registry.clone())
         .types::<Vec<u8>, Document>()
         .name("docs_generic")
         .create(&mut wtxn)?;
@@ -37,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test optimized bytes database
     let mut wtxn = env.write_txn()?;
-    let bytes_db = scoped_database_options(&env)
+    let bytes_db = scoped_database_options(&env, registry.clone())
         .bytes_keys::<Document>()
         .name("docs_bytes")
         .create(&mut wtxn)?;
@@ -56,7 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Customer A gets their own version in generic DB
         let key = b"intro".to_vec();
-        generic_db.put(&mut wtxn, Some("customer_a"), &key, &doc_intro)?;
+        let customer_a = Scope::named("customer_a")?;
+        generic_db.put(&mut wtxn, &customer_a, &key, &doc_intro)?;
 
         // Customer B gets a different version in generic DB
         let doc_custom = Document {
@@ -64,12 +71,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: "Enterprise Guide".to_string(),
             content: "Welcome to the enterprise tier!".to_string(),
         };
-        generic_db.put(&mut wtxn, Some("customer_b"), &key, &doc_custom)?;
+        let customer_b = Scope::named("customer_b")?;
+        generic_db.put(&mut wtxn, &customer_b, &key, &doc_custom)?;
 
         // Same isolation pattern with bytes DB
         bytes_db.put(
             &mut wtxn,
-            Some("customer_a"),
+            &customer_a,
             b"manual",
             &Document {
                 id: 2,
@@ -80,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         bytes_db.put(
             &mut wtxn,
-            Some("customer_b"),
+            &customer_b,
             b"manual",
             &Document {
                 id: 2,
@@ -98,14 +106,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Generic DB - Scope Isolation:");
         let key = b"intro".to_vec();
-        let customer_a_doc = generic_db.get(&rtxn, Some("customer_a"), &key)?;
-        let customer_b_doc = generic_db.get(&rtxn, Some("customer_b"), &key)?;
+        let customer_a = Scope::named("customer_a")?;
+        let customer_b = Scope::named("customer_b")?;
+        let customer_a_doc = generic_db.get(&rtxn, &customer_a, &key)?;
+        let customer_b_doc = generic_db.get(&rtxn, &customer_b, &key)?;
         println!("  Customer A intro: {:?}", customer_a_doc.map(|d| d.title));
         println!("  Customer B intro: {:?}", customer_b_doc.map(|d| d.title));
 
         println!("\nBytes DB - Scope Isolation:");
-        let customer_a_manual = bytes_db.get(&rtxn, Some("customer_a"), b"manual")?;
-        let customer_b_manual = bytes_db.get(&rtxn, Some("customer_b"), b"manual")?;
+        let customer_a_manual = bytes_db.get(&rtxn, &customer_a, b"manual")?;
+        let customer_b_manual = bytes_db.get(&rtxn, &customer_b, b"manual")?;
         println!(
             "  Customer A manual: {:?}",
             customer_a_manual.map(|d| d.title)

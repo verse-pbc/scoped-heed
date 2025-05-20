@@ -5,7 +5,7 @@
 //! isolated database scope.
 
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedDbError, scoped_database_options};
+use scoped_heed::{Scope, ScopedDbError, scoped_database_options, GlobalScopeRegistry};
 use std::sync::Arc;
 use std::thread;
 
@@ -24,10 +24,15 @@ fn main() -> Result<(), ScopedDbError> {
             .open(db_path)?
     });
 
+    // Create a global registry
+    let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+
     // Create a shared database instance
     let mut wtxn = env.write_txn()?;
     let db = Arc::new(
-        scoped_database_options(&env)
+        scoped_database_options(&env, registry.clone())
             .types::<String, i32>()
             .name("test_data")
             .create(&mut wtxn)?,
@@ -43,25 +48,25 @@ fn main() -> Result<(), ScopedDbError> {
 
         let handle = thread::spawn(move || {
             // Each test uses its own scope - completely isolated
-            let test_scope = format!("test_{}", test_id);
+            let test_scope = Scope::named(&format!("test_{}", test_id)).unwrap();
 
             // Run test operations
             let mut wtxn = env.write_txn().unwrap();
 
             // Each test can use the same keys without conflicts
-            db.put(&mut wtxn, Some(&test_scope), &"counter".to_string(), &0)
+            db.put(&mut wtxn, &test_scope, &"counter".to_string(), &0)
                 .unwrap();
-            db.put(&mut wtxn, Some(&test_scope), &"status".to_string(), &1)
+            db.put(&mut wtxn, &test_scope, &"status".to_string(), &1)
                 .unwrap();
 
             // Simulate test operations
             for i in 1..=10 {
                 let counter_key = "counter".to_string();
                 let current = db
-                    .get(&wtxn, Some(&test_scope), &counter_key)
+                    .get(&wtxn, &test_scope, &counter_key)
                     .unwrap()
                     .unwrap_or(0);
-                db.put(&mut wtxn, Some(&test_scope), &counter_key, &(current + i))
+                db.put(&mut wtxn, &test_scope, &counter_key, &(current + i))
                     .unwrap();
             }
 
@@ -70,7 +75,7 @@ fn main() -> Result<(), ScopedDbError> {
             // Verify test results
             let rtxn = env.read_txn().unwrap();
             let final_counter = db
-                .get(&rtxn, Some(&test_scope), &"counter".to_string())
+                .get(&rtxn, &test_scope, &"counter".to_string())
                 .unwrap()
                 .unwrap();
 
@@ -81,7 +86,7 @@ fn main() -> Result<(), ScopedDbError> {
 
             // Each test can clean up its own scope without affecting others
             let mut wtxn = env.write_txn().unwrap();
-            db.clear(&mut wtxn, Some(&test_scope)).unwrap();
+            db.clear(&mut wtxn, &test_scope).unwrap();
             wtxn.commit().unwrap();
 
             println!("Test {} cleaned up its scope", test_id);
@@ -102,13 +107,13 @@ fn main() -> Result<(), ScopedDbError> {
     {
         let rtxn = env.read_txn()?;
         for test_id in 1..=5 {
-            let test_scope = format!("test_{}", test_id);
+            let test_scope = Scope::named(&format!("test_{}", test_id))?;
             let count: i32 = db
-                .iter(&rtxn, Some(&test_scope))?
+                .iter(&rtxn, &test_scope)?
                 .count()
                 .try_into()
                 .unwrap();
-            println!("Scope {} has {} entries", test_scope, count);
+            println!("Scope {} has {} entries", test_id, count);
         }
     }
 

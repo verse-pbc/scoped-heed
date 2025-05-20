@@ -5,7 +5,8 @@
 //! namespace with no possibility of cross-tenant data access.
 
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedDbError, scoped_database_options};
+use scoped_heed::{Scope, ScopedDbError, scoped_database_options, GlobalScopeRegistry};
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,15 +38,20 @@ fn main() -> Result<(), ScopedDbError> {
             .open(db_path)?
     };
 
-    // Create databases for different data types
+    // Create a global registry for scope metadata
+    let mut wtxn = env.write_txn()?;
+    let global_registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+    
+    // Create databases for different data types using the builder pattern
     let mut wtxn = env.write_txn()?;
 
-    let users_db = scoped_database_options(&env)
+    let users_db = scoped_database_options(&env, global_registry.clone())
         .types::<u64, User>()
         .name("users")
         .create(&mut wtxn)?;
 
-    let products_db = scoped_database_options(&env)
+    let products_db = scoped_database_options(&env, global_registry.clone())
         .types::<u64, Product>()
         .name("products")
         .create(&mut wtxn)?;
@@ -53,8 +59,8 @@ fn main() -> Result<(), ScopedDbError> {
     wtxn.commit()?;
 
     // Simulate two different tenants using the same database
-    let tenant1 = "acme_corp";
-    let tenant2 = "tech_startup";
+    let tenant1_scope = Scope::named("acme_corp")?;
+    let tenant2_scope = Scope::named("tech_startup")?;
 
     // Populate data for tenant 1
     {
@@ -63,7 +69,7 @@ fn main() -> Result<(), ScopedDbError> {
         // Add users for tenant 1
         users_db.put(
             &mut wtxn,
-            Some(tenant1),
+            &tenant1_scope,
             &1,
             &User {
                 id: 1,
@@ -74,7 +80,7 @@ fn main() -> Result<(), ScopedDbError> {
 
         users_db.put(
             &mut wtxn,
-            Some(tenant1),
+            &tenant1_scope,
             &2,
             &User {
                 id: 2,
@@ -86,7 +92,7 @@ fn main() -> Result<(), ScopedDbError> {
         // Add products for tenant 1
         products_db.put(
             &mut wtxn,
-            Some(tenant1),
+            &tenant1_scope,
             &101,
             &Product {
                 id: 101,
@@ -105,7 +111,7 @@ fn main() -> Result<(), ScopedDbError> {
         // Add users for tenant 2 - same user IDs, completely different data
         users_db.put(
             &mut wtxn,
-            Some(tenant2),
+            &tenant2_scope,
             &1,
             &User {
                 id: 1,
@@ -116,7 +122,7 @@ fn main() -> Result<(), ScopedDbError> {
 
         users_db.put(
             &mut wtxn,
-            Some(tenant2),
+            &tenant2_scope,
             &2,
             &User {
                 id: 2,
@@ -128,7 +134,7 @@ fn main() -> Result<(), ScopedDbError> {
         // Add products for tenant 2 - same product ID, different data
         products_db.put(
             &mut wtxn,
-            Some(tenant2),
+            &tenant2_scope,
             &101,
             &Product {
                 id: 101,
@@ -147,32 +153,32 @@ fn main() -> Result<(), ScopedDbError> {
         println!("=== Redis-like Scope Isolation Demo ===\n");
 
         // Query tenant 1 data
-        println!("Tenant 1 ({}) Data:", tenant1);
-        let user = users_db.get(&rtxn, Some(tenant1), &1)?.unwrap();
+        println!("Tenant 1 (acme_corp) Data:");
+        let user = users_db.get(&rtxn, &tenant1_scope, &1)?.unwrap();
         println!("  User 1: {:?}", user);
-        let product = products_db.get(&rtxn, Some(tenant1), &101)?.unwrap();
+        let product = products_db.get(&rtxn, &tenant1_scope, &101)?.unwrap();
         println!("  Product 101: {:?}", product);
 
         println!();
 
         // Query tenant 2 data - same keys, completely different data
-        println!("Tenant 2 ({}) Data:", tenant2);
-        let user = users_db.get(&rtxn, Some(tenant2), &1)?.unwrap();
+        println!("Tenant 2 (tech_startup) Data:");
+        let user = users_db.get(&rtxn, &tenant2_scope, &1)?.unwrap();
         println!("  User 1: {:?}", user);
-        let product = products_db.get(&rtxn, Some(tenant2), &101)?.unwrap();
+        let product = products_db.get(&rtxn, &tenant2_scope, &101)?.unwrap();
         println!("  Product 101: {:?}", product);
 
         println!();
 
         // Demonstrate iteration is scope-isolated
         println!("All users in tenant 1:");
-        for result in users_db.iter(&rtxn, Some(tenant1))? {
+        for result in users_db.iter(&rtxn, &tenant1_scope)? {
             let (id, user) = result?;
             println!("  ID {}: {}", id, user.name);
         }
 
         println!("\nAll users in tenant 2:");
-        for result in users_db.iter(&rtxn, Some(tenant2))? {
+        for result in users_db.iter(&rtxn, &tenant2_scope)? {
             let (id, user) = result?;
             println!("  ID {}: {}", id, user.name);
         }
@@ -185,8 +191,8 @@ fn main() -> Result<(), ScopedDbError> {
 
     {
         let mut wtxn = env.write_txn()?;
-        users_db.clear(&mut wtxn, Some(tenant1))?;
-        products_db.clear(&mut wtxn, Some(tenant1))?;
+        users_db.clear(&mut wtxn, &tenant1_scope)?;
+        products_db.clear(&mut wtxn, &tenant1_scope)?;
         wtxn.commit()?;
     }
 
@@ -196,11 +202,11 @@ fn main() -> Result<(), ScopedDbError> {
         println!("After clearing tenant 1:");
         println!(
             "  Tenant 1 users: {:?}",
-            users_db.get(&rtxn, Some(tenant1), &1)?
+            users_db.get(&rtxn, &tenant1_scope, &1)?
         );
         println!(
             "  Tenant 2 users: {:?}",
-            users_db.get(&rtxn, Some(tenant2), &1)?
+            users_db.get(&rtxn, &tenant2_scope, &1)?
         );
 
         println!("\n✅ Tenant 2 data remains intact - scopes are completely isolated!");
