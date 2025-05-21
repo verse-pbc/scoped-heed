@@ -1,19 +1,18 @@
+//! Test suite specifically for the new Scope enum API and metadata features
 use heed::{Env, EnvOpenOptions};
-use scoped_heed::{ScopedDbError, scoped_database_options, Scope, GlobalScopeRegistry};
+use scoped_heed::{Scope, ScopedDbError, scoped_database_options, GlobalScopeRegistry};
+use std::sync::Arc;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 struct TestEnv {
     env: Env,
     db_path: PathBuf,
 }
 
-// Unused helper function has been removed
-
 impl TestEnv {
     fn new(test_name: &str) -> Result<Self, ScopedDbError> {
-        let db_path = PathBuf::from(format!("/tmp/test_db_{}", test_name));
+        let db_path = PathBuf::from(format!("/tmp/test_scope_enum_{}", test_name));
 
         if db_path.exists() {
             fs::remove_dir_all(&db_path).unwrap();
@@ -22,14 +21,11 @@ impl TestEnv {
 
         let env = unsafe {
             EnvOpenOptions::new()
-                .map_size(10 * 1024 * 1024) // 10MB
-                .max_dbs(20) // Increased from 5 to 20 to support metadata databases
+                .map_size(10 * 1024 * 1024)
+                .max_dbs(5)
                 .open(&db_path)?
         };
-        Ok(TestEnv { 
-            env, 
-            db_path,
-        })
+        Ok(TestEnv { env, db_path })
     }
 }
 
@@ -40,39 +36,39 @@ impl Drop for TestEnv {
 }
 
 #[test]
-fn test_basic_operations() -> Result<(), ScopedDbError> {
+fn test_scope_enum_basic_operations() -> Result<(), ScopedDbError> {
     let test_env = TestEnv::new("basic_ops")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
     let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
-        .name("test")
+        .name("test_scope_enum")
         .create(&mut wtxn)?;
     wtxn.commit()?;
+
+    // Create scope objects
+    let tenant1 = Scope::named("tenant1")?;
+    let tenant2 = Scope::named("tenant2")?;
 
     {
         let mut wtxn = env.write_txn()?;
 
-        // Test scoped operations
-        let tenant1_scope = Scope::named("tenant1")?;
-        let tenant2_scope = Scope::named("tenant2")?;
-        
+        // Test scoped operations with Scope enum
         db.put(
             &mut wtxn,
-            &tenant1_scope,
+            &tenant1,
             &"key1".to_string(),
             &"value1".to_string(),
         )?;
         db.put(
             &mut wtxn,
-            &tenant2_scope,
+            &tenant2,
             &"key1".to_string(),
             &"value2".to_string(),
         )?;
@@ -91,26 +87,11 @@ fn test_basic_operations() -> Result<(), ScopedDbError> {
     {
         let rtxn = env.read_txn()?;
 
-        // Print contents for debugging
-        println!("Debugging scoped data...");
-        for scope_name in ["tenant1", "tenant2"].iter() {
-            println!("Checking scope: {}", scope_name);
-            // Create Scope enum directly for debugging
-            let scope = Scope::named(scope_name)?;
-            
-            // Get value with Scope API
-            let val = db.get(&rtxn, &scope, &"key1".to_string())?;
-            println!("  Value: {:?}", val);
-        }
-        
         // Verify scoped data isolation
-        let tenant1_scope = Scope::named("tenant1")?;
-        let tenant2_scope = Scope::named("tenant2")?;
-        
-        let val1 = db.get(&rtxn, &tenant1_scope, &"key1".to_string())?;
+        let val1 = db.get(&rtxn, &tenant1, &"key1".to_string())?;
         assert_eq!(val1, Some("value1".to_string()));
 
-        let val2 = db.get(&rtxn, &tenant2_scope, &"key1".to_string())?;
+        let val2 = db.get(&rtxn, &tenant2, &"key1".to_string())?;
         assert_eq!(val2, Some("value2".to_string()));
 
         // Verify default scope
@@ -118,7 +99,7 @@ fn test_basic_operations() -> Result<(), ScopedDbError> {
         assert_eq!(global_val, Some("global_value".to_string()));
 
         // Verify non-existent keys
-        let missing = db.get(&rtxn, &tenant1_scope, &"missing".to_string())?;
+        let missing = db.get(&rtxn, &tenant1, &"missing".to_string())?;
         assert_eq!(missing, None);
     }
 
@@ -126,99 +107,122 @@ fn test_basic_operations() -> Result<(), ScopedDbError> {
 }
 
 #[test]
-fn test_empty_scope_error() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("empty_scope")?;
+fn test_scope_listing_and_pruning() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("listing_pruning")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
-    let _db = scoped_database_options(env, registry.clone())
+    let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
         .name("test")
         .create(&mut wtxn)?;
     wtxn.commit()?;
-
-    let mut _wtxn = env.write_txn()?;
-
-    // Test that empty scope string is rejected
-    let result = Scope::named("");
-
-    match result {
-        Err(ScopedDbError::EmptyScopeDisallowed) => Ok(()),
-        _ => panic!("Expected EmptyScopeDisallowed error"),
-    }
-}
-
-#[test]
-fn test_multiple_databases() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("multiple_dbs")?;
-    let env = &test_env.env;
-
-    // Create a global registry for tracking scopes
-    let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
-    wtxn.commit()?;
     
-    // Create two separate databases with different types
-    let mut wtxn = env.write_txn()?;
-    let string_db = scoped_database_options(env, registry.clone())
-        .types::<String, String>()
-        .name("strings")
-        .create(&mut wtxn)?;
-    let int_db = scoped_database_options(env, registry.clone())
-        .types::<String, u32>()
-        .name("integers")
-        .create(&mut wtxn)?;
-    wtxn.commit()?;
+    // Create scope objects
+    let tenant1 = Scope::named("tenant1")?;
+    let tenant2 = Scope::named("tenant2")?;
+    let tenant3 = Scope::named("tenant3")?;
 
+    // Add data to scopes 1 and 2 but not 3
     {
         let mut wtxn = env.write_txn()?;
-
-        // Store different types in different databases
-        let tenant1_scope = Scope::named("tenant1")?;
         
-        string_db.put(
-            &mut wtxn,
-            &tenant1_scope,
-            &"name".to_string(),
-            &"Alice".to_string(),
-        )?;
-        int_db.put(&mut wtxn, &tenant1_scope, &"age".to_string(), &30u32)?;
-
+        // Add data to default scope
+        db.put(&mut wtxn, &Scope::Default, &"key1".to_string(), &"default_value".to_string())?;
+        
+        // Add data to tenant1
+        db.put(&mut wtxn, &tenant1, &"key1".to_string(), &"tenant1_value".to_string())?;
+        
+        // Add data to tenant2
+        db.put(&mut wtxn, &tenant2, &"key1".to_string(), &"tenant2_value".to_string())?;
+        
+        // Register tenant3 but don't add data
+        db.register_scope(&mut wtxn, &tenant3)?;
+        
         wtxn.commit()?;
     }
-
+    
+    // List scopes
     {
         let rtxn = env.read_txn()?;
-
-        let tenant1_scope = Scope::named("tenant1")?;
+        let scopes = db.list_scopes(&rtxn)?;
         
-        let name = string_db.get(&rtxn, &tenant1_scope, &"name".to_string())?;
-        assert_eq!(name, Some("Alice".to_string()));
-
-        let age = int_db.get(&rtxn, &tenant1_scope, &"age".to_string())?;
-        assert_eq!(age, Some(30));
+        // Should have 4 scopes: Default + 3 named scopes
+        assert_eq!(scopes.len(), 4);
+        
+        // Verify all scopes are present
+        let has_default = scopes.iter().any(|s| matches!(s, Scope::Default));
+        let has_tenant1 = scopes.iter().any(|s| matches!(s, Scope::Named { name, .. } if name == "tenant1"));
+        let has_tenant2 = scopes.iter().any(|s| matches!(s, Scope::Named { name, .. } if name == "tenant2"));
+        let has_tenant3 = scopes.iter().any(|s| matches!(s, Scope::Named { name, .. } if name == "tenant3"));
+        
+        assert!(has_default, "Default scope missing");
+        assert!(has_tenant1, "tenant1 scope missing");
+        assert!(has_tenant2, "tenant2 scope missing");
+        assert!(has_tenant3, "tenant3 scope missing");
+    }
+    
+    // Find empty scopes
+    {
+        let mut wtxn = env.write_txn()?;
+        let empty_scopes = db.find_empty_scopes(&mut wtxn)?;
+        
+        // Should have found only tenant3 as empty
+        assert_eq!(empty_scopes, 1, "Wrong number of empty scopes found");
+        
+        wtxn.commit()?;
+    }
+    
+    // Now let's test the prune_empty_scopes functionality
+    {
+        let rtxn = env.read_txn()?;
+        let scopes_before = db.list_scopes(&rtxn)?;
+        
+        // Should have 4 scopes: Default + tenant1 + tenant2 + tenant3
+        assert_eq!(scopes_before.len(), 4);
+        
+        let mut wtxn = env.write_txn()?;
+        
+        // Use the global registry to prune empty scopes instead of the database method
+        let databases: [&dyn scoped_heed::ScopeEmptinessChecker; 1] = [&db];
+        let pruned_count = registry.prune_globally_unused_scopes(&mut wtxn, &databases)?;
+        
+        // Should have pruned only tenant3
+        assert_eq!(pruned_count, 1, "Wrong number of scopes pruned");
+        
+        wtxn.commit()?;
+    }
+    
+    // Verify tenant3 was pruned
+    {
+        let rtxn = env.read_txn()?;
+        let scopes = db.list_scopes(&rtxn)?;
+        
+        // Should have 3 scopes now: Default + tenant1 + tenant2
+        assert_eq!(scopes.len(), 3);
+        
+        let has_tenant3 = scopes.iter().any(|s| matches!(s, Scope::Named { name, .. } if name == "tenant3"));
+        assert!(!has_tenant3, "tenant3 scope should have been pruned");
     }
 
     Ok(())
 }
 
 #[test]
-fn test_delete_operations() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("delete_ops")?;
+fn test_delete_operations_with_scope_enum() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("delete_ops_scope")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
     let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
@@ -226,11 +230,12 @@ fn test_delete_operations() -> Result<(), ScopedDbError> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
+    // Create scope
+    let scope1 = Scope::named("scope1")?;
+
     // Insert some data
     {
         let mut wtxn = env.write_txn()?;
-        let scope1 = Scope::named("scope1")?;
-        
         db.put(
             &mut wtxn,
             &scope1,
@@ -255,8 +260,6 @@ fn test_delete_operations() -> Result<(), ScopedDbError> {
     // Delete a key
     {
         let mut wtxn = env.write_txn()?;
-        let scope1 = Scope::named("scope1")?;
-        
         let deleted = db.delete(&mut wtxn, &scope1, &"key1".to_string())?;
         assert!(deleted);
 
@@ -270,8 +273,6 @@ fn test_delete_operations() -> Result<(), ScopedDbError> {
     // Verify deletion
     {
         let rtxn = env.read_txn()?;
-        let scope1 = Scope::named("scope1")?;
-        
         let val1 = db.get(&rtxn, &scope1, &"key1".to_string())?;
         assert_eq!(val1, None);
 
@@ -286,16 +287,15 @@ fn test_delete_operations() -> Result<(), ScopedDbError> {
 }
 
 #[test]
-fn test_clear_operations() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("clear_ops")?;
+fn test_clear_operations_with_scope_enum() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("clear_ops_scope")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
     let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
@@ -303,12 +303,13 @@ fn test_clear_operations() -> Result<(), ScopedDbError> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
+    // Create scopes
+    let scope1 = Scope::named("scope1")?;
+    let scope2 = Scope::named("scope2")?;
+
     // Insert data in multiple scopes
     {
         let mut wtxn = env.write_txn()?;
-        let scope1 = Scope::named("scope1")?;
-        let scope2 = Scope::named("scope2")?;
-        
         db.put(
             &mut wtxn,
             &scope1,
@@ -339,7 +340,6 @@ fn test_clear_operations() -> Result<(), ScopedDbError> {
     // Clear a specific scope
     {
         let mut wtxn = env.write_txn()?;
-        let scope1 = Scope::named("scope1")?;
         db.clear(&mut wtxn, &scope1)?;
         wtxn.commit()?;
     }
@@ -347,9 +347,6 @@ fn test_clear_operations() -> Result<(), ScopedDbError> {
     // Verify only scope1 was cleared
     {
         let rtxn = env.read_txn()?;
-        let scope1 = Scope::named("scope1")?;
-        let scope2 = Scope::named("scope2")?;
-        
         let val1 = db.get(&rtxn, &scope1, &"key1".to_string())?;
         assert_eq!(val1, None);
 
@@ -373,8 +370,6 @@ fn test_clear_operations() -> Result<(), ScopedDbError> {
     // Verify default scope was cleared
     {
         let rtxn = env.read_txn()?;
-        let scope2 = Scope::named("scope2")?;
-        
         let default_val = db.get(&rtxn, &Scope::Default, &"key1".to_string())?;
         assert_eq!(default_val, None);
 
@@ -387,16 +382,15 @@ fn test_clear_operations() -> Result<(), ScopedDbError> {
 }
 
 #[test]
-fn test_iter_operations() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("iter_ops")?;
+fn test_iter_operations_with_scope_enum() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("iter_ops_scope")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
     let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
@@ -404,10 +398,13 @@ fn test_iter_operations() -> Result<(), ScopedDbError> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
+    // Create scopes
+    let scope1 = Scope::named("scope1")?;
+    let scope2 = Scope::named("scope2")?;
+
     // Insert data in multiple scopes
     {
         let mut wtxn = env.write_txn()?;
-        let scope1 = Scope::named("scope1")?;
         db.put(
             &mut wtxn,
             &scope1,
@@ -426,7 +423,6 @@ fn test_iter_operations() -> Result<(), ScopedDbError> {
             &"c".to_string(),
             &"value3".to_string(),
         )?;
-        let scope2 = Scope::named("scope2")?;
         db.put(
             &mut wtxn,
             &scope2,
@@ -449,7 +445,6 @@ fn test_iter_operations() -> Result<(), ScopedDbError> {
         let rtxn = env.read_txn()?;
         let mut items: Vec<(String, String)> = vec![];
 
-        let scope1 = Scope::named("scope1")?;
         for result in db.iter(&rtxn, &scope1)? {
             let (key, value) = result?;
             items.push((key, value));
@@ -483,22 +478,24 @@ fn test_iter_operations() -> Result<(), ScopedDbError> {
 }
 
 #[test]
-fn test_range_operations() -> Result<(), ScopedDbError> {
-    let test_env = TestEnv::new("range_ops")?;
+fn test_range_operations_with_scope_enum() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("range_ops_scope")?;
     let env = &test_env.env;
 
     // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
     wtxn.commit()?;
     
-    // Create the database with the registry
     let mut wtxn = env.write_txn()?;
     let db = scoped_database_options(env, registry.clone())
         .types::<String, String>()
         .name("test")
         .create(&mut wtxn)?;
     wtxn.commit()?;
+
+    // Create scopes
+    let scope1 = Scope::named("scope1")?;
 
     // Insert ordered data
     {
@@ -511,7 +508,6 @@ fn test_range_operations() -> Result<(), ScopedDbError> {
         db.put(&mut wtxn, &Scope::Default, &"d".to_string(), &"default_d".to_string())?;
 
         // Scope1
-        let scope1 = Scope::named("scope1")?;
         db.put(
             &mut wtxn,
             &scope1,
@@ -546,7 +542,6 @@ fn test_range_operations() -> Result<(), ScopedDbError> {
         let mut items: Vec<(String, String)> = vec![];
 
         let range = "b".to_string()..="c".to_string();
-        let scope1 = Scope::named("scope1")?;
         for result in db.range(&rtxn, &scope1, &range)? {
             let (key, value) = result?;
             items.push((key, value));
@@ -577,45 +572,62 @@ fn test_range_operations() -> Result<(), ScopedDbError> {
         assert_eq!(items[1], ("c".to_string(), "default_c".to_string()));
     }
 
-    // Test range with bytes database
+    Ok(())
+}
+
+#[test]
+fn test_bytes_database_with_scope_enum() -> Result<(), ScopedDbError> {
+    let test_env = TestEnv::new("bytes_scope")?;
+    let env = &test_env.env;
+
+    // Create a global registry for tracking scopes
     let mut wtxn = env.write_txn()?;
-    let bytes_db = scoped_database_options(env, registry.clone())
-        .bytes_keys::<String>()
+    let registry = Arc::new(GlobalScopeRegistry::new(env, &mut wtxn)?);  
+    wtxn.commit()?;
+    
+    // Create a ScopedBytesDatabase
+    let mut wtxn = env.write_txn()?;
+    let db = scoped_database_options(env, registry.clone())
+        .raw_bytes()
         .name("bytes_test")
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
+    // Create scope
+    let scope1 = Scope::named("scope1")?;
+
+    // Insert data
     {
         let mut wtxn = env.write_txn()?;
-
-        // Insert byte keys
-        let scope1 = Scope::named("scope1")?;
-        bytes_db.put(&mut wtxn, &scope1, b"key1", &"value1".to_string())?;
-        bytes_db.put(&mut wtxn, &scope1, b"key2", &"value2".to_string())?;
-        bytes_db.put(&mut wtxn, &scope1, b"key3", &"value3".to_string())?;
-
+        db.put(&mut wtxn, &scope1, b"key1", b"value1")?;
+        db.put(&mut wtxn, &scope1, b"key2", b"value2")?;
+        db.put(&mut wtxn, &Scope::Default, b"key1", b"default1")?;
         wtxn.commit()?;
     }
 
-    // Test byte range [key1, key2]
+    // Verify data
     {
         let rtxn = env.read_txn()?;
-        let mut items: Vec<(&[u8], String)> = vec![];
+        let val1 = db.get(&rtxn, &scope1, b"key1")?;
+        assert_eq!(val1, Some(&b"value1"[..]));
 
-        let key1: &[u8] = b"key1";
-        let key2: &[u8] = b"key2";
-        let range = key1..=key2;
-        let scope1 = Scope::named("scope1")?;
-        for result in bytes_db.range(&rtxn, &scope1, &range)? {
-            let (key, value) = result?;
-            items.push((key, value));
-        }
+        let val2 = db.get(&rtxn, &scope1, b"key2")?;
+        assert_eq!(val2, Some(&b"value2"[..]));
 
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].0, b"key1");
-        assert_eq!(items[0].1, "value1");
-        assert_eq!(items[1].0, b"key2");
-        assert_eq!(items[1].1, "value2");
+        let default_val = db.get(&rtxn, &Scope::Default, b"key1")?;
+        assert_eq!(default_val, Some(&b"default1"[..]));
+    }
+
+    // List scopes
+    {
+        let rtxn = env.read_txn()?;
+        let scopes = db.list_scopes(&rtxn)?;
+        
+        // Should have 2 scopes: Default + scope1
+        assert_eq!(scopes.len(), 2);
+        
+        let has_scope1 = scopes.iter().any(|s| matches!(s, Scope::Named { name, .. } if name == "scope1"));
+        assert!(has_scope1, "scope1 missing");
     }
 
     Ok(())

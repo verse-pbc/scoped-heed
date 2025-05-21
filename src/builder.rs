@@ -1,4 +1,5 @@
-use crate::{ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase, ScopedDbError};
+use crate::{ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase, ScopedDbError, GlobalScopeRegistry};
+use std::sync::Arc;
 use heed::{Env, RwTxn};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -6,12 +7,19 @@ use std::marker::PhantomData;
 /// Builder for creating scoped databases with flexible type configurations
 pub struct ScopedDatabaseOptions<'env> {
     env: &'env Env,
+    global_registry: Arc<GlobalScopeRegistry>,
 }
 
 impl<'env> ScopedDatabaseOptions<'env> {
     /// Create a new options builder
-    pub fn new(env: &'env Env) -> Self {
-        Self { env }
+    pub fn new(env: &'env Env, global_registry: Arc<GlobalScopeRegistry>) -> Self {
+        Self { env, global_registry }
+    }
+
+    /// Alias for backward compatibility
+    pub fn with_registry(self, _registry: Arc<GlobalScopeRegistry>) -> Self {
+        // Registry is already provided at construction time
+        self
     }
 
     /// Configure database with generic key and value types using SerdeBincode
@@ -24,6 +32,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
         TypedOptions {
             env: self.env,
             name: None,
+            global_registry: self.global_registry,
             _phantom: PhantomData,
         }
     }
@@ -37,6 +46,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
         BytesKeysOptions {
             env: self.env,
             name: None,
+            global_registry: self.global_registry,
             _phantom: PhantomData,
         }
     }
@@ -47,6 +57,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
         RawBytesOptions {
             env: self.env,
             name: None,
+            global_registry: self.global_registry,
         }
     }
 }
@@ -55,12 +66,13 @@ impl<'env> ScopedDatabaseOptions<'env> {
 pub struct TypedOptions<'env, K, V> {
     env: &'env Env,
     name: Option<String>,
+    global_registry: Arc<GlobalScopeRegistry>,
     _phantom: PhantomData<(K, V)>,
 }
 
 impl<K, V> TypedOptions<'_, K, V>
 where
-    K: Serialize + for<'de> Deserialize<'de> + Clone + 'static,
+    K: Serialize + for<'de> Deserialize<'de> + Clone + Default + 'static,
     V: Serialize + for<'de> Deserialize<'de> + 'static,
 {
     /// Set the database name
@@ -69,13 +81,15 @@ where
         self
     }
 
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedDatabase<K, V>, ScopedDbError> {
         let name = self
             .name
             .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
 
-        ScopedDatabase::create(self.env, &name, txn)
+        // Always use the global registry (required for scope management)
+        ScopedDatabase::create(self.env, &name, txn, self.global_registry.clone())
     }
 }
 
@@ -83,6 +97,7 @@ where
 pub struct BytesKeysOptions<'env, V> {
     env: &'env Env,
     name: Option<String>,
+    global_registry: Arc<GlobalScopeRegistry>,
     _phantom: PhantomData<V>,
 }
 
@@ -96,13 +111,14 @@ where
         self
     }
 
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedBytesKeyDatabase<V>, ScopedDbError> {
         let name = self
             .name
             .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
 
-        ScopedBytesKeyDatabase::create(self.env, &name, txn)
+        crate::scoped_bytes_key_database::ScopedBytesKeyDatabase::create(self.env, &name, txn, self.global_registry.clone())
     }
 }
 
@@ -110,6 +126,7 @@ where
 pub struct RawBytesOptions<'env> {
     env: &'env Env,
     name: Option<String>,
+    global_registry: Arc<GlobalScopeRegistry>,
 }
 
 impl RawBytesOptions<'_> {
@@ -119,17 +136,18 @@ impl RawBytesOptions<'_> {
         self
     }
 
+
     /// Create the database with the current transaction
     pub fn create(self, txn: &mut RwTxn) -> Result<ScopedBytesDatabase, ScopedDbError> {
         let name = self
             .name
             .ok_or_else(|| ScopedDbError::InvalidInput("Database name is required".into()))?;
 
-        ScopedBytesDatabase::create(self.env, &name, txn)
+        crate::scoped_bytes_database::ScopedBytesDatabase::create(self.env, &name, txn, self.global_registry.clone())
     }
 }
 
 /// Module-level function to create scoped database options
-pub fn scoped_database_options(env: &Env) -> ScopedDatabaseOptions {
-    ScopedDatabaseOptions::new(env)
+pub fn scoped_database_options(env: &Env, global_registry: Arc<GlobalScopeRegistry>) -> ScopedDatabaseOptions {
+    ScopedDatabaseOptions::new(env, global_registry)
 }

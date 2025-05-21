@@ -1,5 +1,6 @@
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedBytesDatabase, ScopedBytesKeyDatabase};
+use scoped_heed::{Scope, ScopedBytesDatabase, ScopedBytesKeyDatabase, GlobalScopeRegistry};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,22 +13,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open(dir.path())?
     };
 
+    // Create a global registry
+    let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
+
     // Test ScopedBytesDatabase
     {
-        let db = ScopedBytesDatabase::new(&env, "test_bytes")?;
+        let db = ScopedBytesDatabase::new(&env, "test_bytes", registry.clone())?;
         let mut wtxn = env.write_txn()?;
+        let fruit_scope = Scope::named("fruit")?;
 
         // Insert test data in default scope
-        db.put(&mut wtxn, None, b"apple", b"value1")?;
-        db.put(&mut wtxn, None, b"banana", b"value2")?;
-        db.put(&mut wtxn, None, b"cherry", b"value3")?;
-        db.put(&mut wtxn, None, b"date", b"value4")?;
+        db.put(&mut wtxn, &Scope::Default, b"apple", b"value1")?;
+        db.put(&mut wtxn, &Scope::Default, b"banana", b"value2")?;
+        db.put(&mut wtxn, &Scope::Default, b"cherry", b"value3")?;
+        db.put(&mut wtxn, &Scope::Default, b"date", b"value4")?;
 
         // Insert test data in scoped database
-        db.put(&mut wtxn, Some("fruit"), b"apple", b"scoped_value1")?;
-        db.put(&mut wtxn, Some("fruit"), b"banana", b"scoped_value2")?;
-        db.put(&mut wtxn, Some("fruit"), b"cherry", b"scoped_value3")?;
-        db.put(&mut wtxn, Some("fruit"), b"date", b"scoped_value4")?;
+        db.put(&mut wtxn, &fruit_scope, b"apple", b"scoped_value1")?;
+        db.put(&mut wtxn, &fruit_scope, b"banana", b"scoped_value2")?;
+        db.put(&mut wtxn, &fruit_scope, b"cherry", b"scoped_value3")?;
+        db.put(&mut wtxn, &fruit_scope, b"date", b"scoped_value4")?;
 
         wtxn.commit()?;
 
@@ -36,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let range = b"apple".as_ref()..=b"cherry".as_ref();
 
         println!("Testing range query on default scope:");
-        for result in db.range(&rtxn, None, &range)? {
+        for result in db.range(&rtxn, &Scope::Default, &range)? {
             let (key, value) = result?;
             println!(
                 "  {} -> {}",
@@ -46,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         println!("\nTesting range query on scoped database:");
-        for result in db.range(&rtxn, Some("fruit"), &range)? {
+        for result in db.range(&rtxn, &fruit_scope, &range)? {
             let (key, value) = result?;
             println!(
                 "  {} -> {}",
@@ -59,14 +66,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test ScopedBytesKeyDatabase
     {
         let db: ScopedBytesKeyDatabase<String> =
-            ScopedBytesKeyDatabase::new(&env, "test_bytes_key")?;
+            ScopedBytesKeyDatabase::new(&env, "test_bytes_key", registry.clone())?;
         let mut wtxn = env.write_txn()?;
 
         // Insert test data in default scope
-        db.put(&mut wtxn, None, b"apple", &"value1".to_string())?;
-        db.put(&mut wtxn, None, b"banana", &"value2".to_string())?;
-        db.put(&mut wtxn, None, b"cherry", &"value3".to_string())?;
-        db.put(&mut wtxn, None, b"date", &"value4".to_string())?;
+        db.put(&mut wtxn, &Scope::Default, b"apple", &"value1".to_string())?;
+        db.put(&mut wtxn, &Scope::Default, b"banana", &"value2".to_string())?;
+        db.put(&mut wtxn, &Scope::Default, b"cherry", &"value3".to_string())?;
+        db.put(&mut wtxn, &Scope::Default, b"date", &"value4".to_string())?;
 
         wtxn.commit()?;
 
@@ -75,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let range = b"banana".as_ref()..b"date".as_ref();
 
         println!("\nTesting ScopedBytesKeyDatabase range query:");
-        for result in db.range(&rtxn, None, &range)? {
+        for result in db.range(&rtxn, &Scope::Default, &range)? {
             let (key, value) = result?;
             println!("  {} -> {}", String::from_utf8_lossy(key), value);
         }
