@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase};
+use scoped_heed::{Scope, ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase};
 use tempfile::TempDir;
 
 fn benchmark_generic_database(c: &mut Criterion) {
@@ -17,10 +17,12 @@ fn benchmark_generic_database(c: &mut Criterion) {
     let key = b"test_key_12345".to_vec();
     let value = "test_value".to_string();
 
+    let scope1 = Scope::named("scope1").unwrap();
+
     c.bench_function("generic_db_write", |b| {
         b.iter(|| {
             let mut wtxn = env.write_txn().unwrap();
-            db.put(&mut wtxn, Some("scope1"), &key, &value).unwrap();
+            db.put(&mut wtxn, &scope1, &key, &value).unwrap();
             wtxn.commit().unwrap();
         });
     });
@@ -28,14 +30,14 @@ fn benchmark_generic_database(c: &mut Criterion) {
     // Prepare some data for read benchmark
     {
         let mut wtxn = env.write_txn().unwrap();
-        db.put(&mut wtxn, Some("scope1"), &key, &value).unwrap();
+        db.put(&mut wtxn, &scope1, &key, &value).unwrap();
         wtxn.commit().unwrap();
     }
 
     c.bench_function("generic_db_read", |b| {
         b.iter(|| {
             let rtxn = env.read_txn().unwrap();
-            let _result = db.get(&rtxn, Some("scope1"), &key).unwrap();
+            let _result = db.get(&rtxn, &scope1, &key).unwrap();
             black_box(_result);
         });
     });
@@ -56,10 +58,12 @@ fn benchmark_bytes_database(c: &mut Criterion) {
     let key = b"test_key_12345";
     let value = "test_value".to_string();
 
+    let scope1 = Scope::named("scope1").unwrap();
+
     c.bench_function("bytes_db_write", |b| {
         b.iter(|| {
             let mut wtxn = env.write_txn().unwrap();
-            db.put(&mut wtxn, Some("scope1"), key, &value).unwrap();
+            db.put(&mut wtxn, &scope1, key, &value).unwrap();
             wtxn.commit().unwrap();
         });
     });
@@ -67,14 +71,14 @@ fn benchmark_bytes_database(c: &mut Criterion) {
     // Prepare some data for read benchmark
     {
         let mut wtxn = env.write_txn().unwrap();
-        db.put(&mut wtxn, Some("scope1"), key, &value).unwrap();
+        db.put(&mut wtxn, &scope1, key, &value).unwrap();
         wtxn.commit().unwrap();
     }
 
     c.bench_function("bytes_db_read", |b| {
         b.iter(|| {
             let rtxn = env.read_txn().unwrap();
-            let _result = db.get(&rtxn, Some("scope1"), key).unwrap();
+            let _result = db.get(&rtxn, &scope1, key).unwrap();
             black_box(_result);
         });
     });
@@ -143,10 +147,12 @@ fn benchmark_fully_optimized_bytes(c: &mut Criterion) {
     let key = b"test_key_12345";
     let value = b"test_value";
 
+    let scope1 = Scope::named("scope1").unwrap();
+
     c.bench_function("pure_bytes_db_write", |b| {
         b.iter(|| {
             let mut wtxn = env.write_txn().unwrap();
-            db.put(&mut wtxn, Some("scope1"), key, value).unwrap();
+            db.put(&mut wtxn, &scope1, key, value).unwrap();
             wtxn.commit().unwrap();
         });
     });
@@ -154,14 +160,14 @@ fn benchmark_fully_optimized_bytes(c: &mut Criterion) {
     // Prepare some data for read benchmark
     {
         let mut wtxn = env.write_txn().unwrap();
-        db.put(&mut wtxn, Some("scope1"), key, value).unwrap();
+        db.put(&mut wtxn, &scope1, key, value).unwrap();
         wtxn.commit().unwrap();
     }
 
     c.bench_function("pure_bytes_db_read", |b| {
         b.iter(|| {
             let rtxn = env.read_txn().unwrap();
-            let _result = db.get(&rtxn, Some("scope1"), key).unwrap();
+            let _result = db.get(&rtxn, &scope1, key).unwrap();
             black_box(_result);
         });
     });

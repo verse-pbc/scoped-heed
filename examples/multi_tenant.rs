@@ -1,12 +1,7 @@
-//! Multi-tenant example demonstrating Redis-like database isolation
-//!
-//! This example shows how scopes provide complete isolation between tenants,
-//! similar to how Redis databases work. Each tenant has its own isolated
-//! namespace with no possibility of cross-tenant data access.
-
 use heed::EnvOpenOptions;
-use scoped_heed::{ScopedDbError, scoped_database_options};
+use scoped_heed::{GlobalScopeRegistry, Scope, scoped_database_options};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct User {
@@ -22,193 +17,158 @@ struct Product {
     price: f64,
 }
 
-fn main() -> Result<(), ScopedDbError> {
-    // Create the database environment
-    let db_path = "./test_multi_tenant";
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = "/tmp/multi_tenant_example";
     if std::path::Path::new(db_path).exists() {
-        std::fs::remove_dir_all(db_path).unwrap();
+        std::fs::remove_dir_all(db_path)?;
     }
-    std::fs::create_dir_all(db_path).unwrap();
+    std::fs::create_dir_all(db_path)?;
 
     let env = unsafe {
         EnvOpenOptions::new()
             .map_size(10 * 1024 * 1024)
-            .max_dbs(6) // Need multiple databases for different types
+            .max_dbs(6)
             .open(db_path)?
     };
 
-    // Create databases for different data types
     let mut wtxn = env.write_txn()?;
+    let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut wtxn)?);
+    wtxn.commit()?;
 
-    let users_db = scoped_database_options(&env)
+    let mut wtxn = env.write_txn()?;
+    let users_db = scoped_database_options(&env, registry.clone())
         .types::<u64, User>()
         .name("users")
         .create(&mut wtxn)?;
 
-    let products_db = scoped_database_options(&env)
+    let products_db = scoped_database_options(&env, registry.clone())
         .types::<u64, Product>()
         .name("products")
         .create(&mut wtxn)?;
 
     wtxn.commit()?;
 
-    // Simulate two different tenants using the same database
-    let tenant1 = "acme_corp";
-    let tenant2 = "tech_startup";
+    let tenant_a = Scope::named("tenant_a")?;
+    let tenant_b = Scope::named("tenant_b")?;
 
-    // Populate data for tenant 1
+    // Populate data for both tenants
     {
         let mut wtxn = env.write_txn()?;
 
-        // Add users for tenant 1
         users_db.put(
             &mut wtxn,
-            Some(tenant1),
+            &tenant_a,
             &1,
             &User {
                 id: 1,
-                name: "Alice Johnson".to_string(),
-                email: "alice@acme.com".to_string(),
+                name: "Alice".to_string(),
+                email: "alice@tenanta.com".to_string(),
             },
         )?;
 
-        users_db.put(
-            &mut wtxn,
-            Some(tenant1),
-            &2,
-            &User {
-                id: 2,
-                name: "Bob Smith".to_string(),
-                email: "bob@acme.com".to_string(),
-            },
-        )?;
-
-        // Add products for tenant 1
         products_db.put(
             &mut wtxn,
-            Some(tenant1),
+            &tenant_a,
             &101,
             &Product {
                 id: 101,
-                name: "Enterprise Widget".to_string(),
-                price: 999.99,
+                name: "Product A".to_string(),
+                price: 99.99,
             },
         )?;
 
-        wtxn.commit()?;
-    }
-
-    // Populate data for tenant 2 - using THE SAME keys but different scope
-    {
-        let mut wtxn = env.write_txn()?;
-
-        // Add users for tenant 2 - same user IDs, completely different data
+        // Same key IDs for tenant B
         users_db.put(
             &mut wtxn,
-            Some(tenant2),
+            &tenant_b,
             &1,
             &User {
                 id: 1,
-                name: "Charlie Davis".to_string(),
-                email: "charlie@techstartup.io".to_string(),
+                name: "Bob".to_string(),
+                email: "bob@tenantb.com".to_string(),
+            },
+        )?;
+
+        products_db.put(
+            &mut wtxn,
+            &tenant_b,
+            &101,
+            &Product {
+                id: 101,
+                name: "Product B".to_string(),
+                price: 149.99,
             },
         )?;
 
         users_db.put(
             &mut wtxn,
-            Some(tenant2),
-            &2,
+            &Scope::Default,
+            &999,
             &User {
-                id: 2,
-                name: "Diana Martinez".to_string(),
-                email: "diana@techstartup.io".to_string(),
-            },
-        )?;
-
-        // Add products for tenant 2 - same product ID, different data
-        products_db.put(
-            &mut wtxn,
-            Some(tenant2),
-            &101,
-            &Product {
-                id: 101,
-                name: "Startup Gadget".to_string(),
-                price: 49.99,
+                id: 999,
+                name: "Admin".to_string(),
+                email: "admin@example.com".to_string(),
             },
         )?;
 
         wtxn.commit()?;
     }
 
-    // Demonstrate complete isolation between tenants
+    // Demonstrate data isolation
     {
         let rtxn = env.read_txn()?;
 
-        println!("=== Redis-like Scope Isolation Demo ===\n");
+        println!("=== Tenant Isolation Demo ===\n");
 
-        // Query tenant 1 data
-        println!("Tenant 1 ({}) Data:", tenant1);
-        let user = users_db.get(&rtxn, Some(tenant1), &1)?.unwrap();
-        println!("  User 1: {:?}", user);
-        let product = products_db.get(&rtxn, Some(tenant1), &101)?.unwrap();
-        println!("  Product 101: {:?}", product);
+        let user_a = users_db.get(&rtxn, &tenant_a, &1)?.unwrap();
+        let user_b = users_db.get(&rtxn, &tenant_b, &1)?.unwrap();
 
-        println!();
+        println!("User 1 in tenant A: {}", user_a.name);
+        println!("User 1 in tenant B: {}", user_b.name);
 
-        // Query tenant 2 data - same keys, completely different data
-        println!("Tenant 2 ({}) Data:", tenant2);
-        let user = users_db.get(&rtxn, Some(tenant2), &1)?.unwrap();
-        println!("  User 1: {:?}", user);
-        let product = products_db.get(&rtxn, Some(tenant2), &101)?.unwrap();
-        println!("  Product 101: {:?}", product);
+        let product_a = products_db.get(&rtxn, &tenant_a, &101)?.unwrap();
+        let product_b = products_db.get(&rtxn, &tenant_b, &101)?.unwrap();
 
-        println!();
+        println!(
+            "\nProduct 101 in tenant A: {} (${:.2})",
+            product_a.name, product_a.price
+        );
+        println!(
+            "Product 101 in tenant B: {} (${:.2})",
+            product_b.name, product_b.price
+        );
 
-        // Demonstrate iteration is scope-isolated
-        println!("All users in tenant 1:");
-        for result in users_db.iter(&rtxn, Some(tenant1))? {
+        println!("\nAll users in tenant A:");
+        for result in users_db.iter(&rtxn, &tenant_a)? {
             let (id, user) = result?;
             println!("  ID {}: {}", id, user.name);
         }
-
-        println!("\nAll users in tenant 2:");
-        for result in users_db.iter(&rtxn, Some(tenant2))? {
-            let (id, user) = result?;
-            println!("  ID {}: {}", id, user.name);
-        }
-
-        println!();
-
-        // Demonstrate that clearing one scope doesn't affect others
-        println!("Clearing all data for tenant 1...");
     }
 
+    // Demonstrate scope operations
     {
         let mut wtxn = env.write_txn()?;
-        users_db.clear(&mut wtxn, Some(tenant1))?;
-        products_db.clear(&mut wtxn, Some(tenant1))?;
+
+        println!("\nClearing tenant A data...");
+        users_db.clear(&mut wtxn, &tenant_a)?;
+        products_db.clear(&mut wtxn, &tenant_a)?;
+
+        println!("Cleared all data for tenant A");
         wtxn.commit()?;
-    }
 
-    {
         let rtxn = env.read_txn()?;
+        let tenant_a_user = users_db.get(&rtxn, &tenant_a, &1)?;
+        let tenant_b_user = users_db.get(&rtxn, &tenant_b, &1)?;
 
-        println!("After clearing tenant 1:");
-        println!(
-            "  Tenant 1 users: {:?}",
-            users_db.get(&rtxn, Some(tenant1), &1)?
-        );
-        println!(
-            "  Tenant 2 users: {:?}",
-            users_db.get(&rtxn, Some(tenant2), &1)?
-        );
+        println!("\nAfter clearing tenant A:");
+        println!("  User 1 in tenant A: {:?}", tenant_a_user);
+        println!("  User 1 in tenant B: {:?}", tenant_b_user.map(|u| u.name));
 
-        println!("\n✅ Tenant 2 data remains intact - scopes are completely isolated!");
+        println!("\n✅ Complete isolation between tenants achieved!");
     }
 
-    // Clean up
     drop(env);
-    std::fs::remove_dir_all(db_path).unwrap();
+    std::fs::remove_dir_all(db_path)?;
 
     Ok(())
 }

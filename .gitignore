@@ -22,3 +22,18 @@
 
 # Claude configuration files
 .claude/
+.cursor/
+.roo/
+.roomodes
+.taskmasterconfig
+.windsurfrules
+.env.example
+
+# Sample files and test data
+scripts/example_prd.txt
+scripts/prd.txt
+test_shared_registry/
+
+# Task Master files
+tasks.json
+tasks/

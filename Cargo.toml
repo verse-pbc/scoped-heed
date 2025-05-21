@@ -1,6 +1,6 @@
 [package]
 name = "scoped-heed"
-version = "0.1.1"
+version = "0.2.0-alpha.1"
 edition = "2024"
 description = "Redis-like database isolation for LMDB via heed - provides completely isolated scopes within a single environment"
 license = "MIT OR Apache-2.0"
@@ -15,24 +15,19 @@ homepage = "https://github.com/verse-pbc/scoped-heed"
 heed = { version = "=0.20.5", default-features = false, features = ["serde-bincode"] }
 serde = { version = "1.0", features = ["derive", "alloc", "std"] }
 bincode = "1.3"
-
-[[example]]
-name = "basic_usage"
-
-[[example]]
-name = "bytes_optimization"
-
-[[example]]
-name = "pure_bytes"
+twox-hash = "1.6.3"
 
 [[example]]
 name = "multi_tenant"
 
 [[example]]
-name = "test_isolation"
+name = "scope_management"
 
 [[example]]
-name = "range_performance"
+name = "performance_optimizations"
+
+[[example]]
+name = "parallel_processing"
 
 [dev-dependencies]
 tempfile = "3"
