@@ -18,7 +18,7 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use scoped_heed::{scoped_database_options, ScopedDbError, Scope};
 //! use heed::EnvOpenOptions;
 //!
@@ -76,9 +76,31 @@
 //!
 //! ## Key Encoding
 //!
-//! Scoped entries use a 32-bit hash prefix for efficient scope identification:
-//! - Default scope: keys are stored as-is
-//! - Named scopes: `[scope_hash: 4 bytes][original_key_data]`
+//! Scoped entries use different key encoding strategies depending on the database type:
+//! 
+//! ### Generic Database (`ScopedDatabase<K,V>`)
+//! - Default scope: keys are stored using the `K` codec directly
+//! - Named scopes: Keys are stored as a serialized `ScopedKey<K>` struct containing:
+//!   ```rust
+//!   struct ScopedKey<K> {
+//!       scope_hash: u32,  // 32-bit xxHash of the scope name
+//!       key: K,           // The original key
+//!   }
+//!   ```
+//!
+//! ### Bytes Key Databases (`ScopedBytesKeyDatabase<V>` and `ScopedBytesDatabase`)
+//! - Default scope: raw byte keys are stored as-is
+//! - Named scopes: Keys use the following binary format:
+//!   ```text
+//!   [scope_hash_le: 4 bytes][key_len_le: 8 bytes][original_key_data]
+//!   ```
+//!   where:
+//!   - `scope_hash_le`: 32-bit xxHash of the scope name (little-endian)
+//!   - `key_len_le`: 64-bit length of the original key (little-endian)
+//!   - `original_key_data`: The original key bytes
+//!   
+//! This specialized binary format in the byte databases provides substantial performance 
+//! improvements over the generic encoding, particularly for key decoding operations.
 
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;

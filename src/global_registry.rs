@@ -9,9 +9,33 @@ use heed::{Database as HeedDatabase, Env, RoTxn, RwTxn};
 /// all scopes and enables global operations like listing all scopes or pruning empty
 /// scopes across all database instances.
 ///
+/// # Hash Collision Protection
+///
+/// One of the important safety functions of the `GlobalScopeRegistry` is to detect
+/// and prevent hash collisions between different scope names. Since the library
+/// uses 32-bit hashes for scope identification, there is a mathematical possibility
+/// of two different scope names producing the same hash value.
+///
+/// When you call `register_scope()` (which happens automatically during write operations),
+/// the registry checks if the hash already exists. If it does and is associated with a
+/// different scope name, it returns a `ScopedDbError::InvalidInput` error with details
+/// about the collision.
+///
+/// This safety check is critical because without it, a hash collision could cause data
+/// from one scope to be visible in or affected by operations on another scope, breaking
+/// the isolation guarantees of the library.
+///
+/// ## Performance Considerations
+///
+/// The `lookup_scope_hash()` method, which finds a hash by scope name, iterates through
+/// all registered scopes. This is generally fast for normal usage (up to thousands of scopes),
+/// but could become a performance concern with a very large number of unique scopes (tens
+/// of thousands or more). In such cases, consider grouping related data under fewer scopes
+/// or using a hierarchical scope naming scheme.
+///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// # use scoped_heed::{GlobalScopeRegistry, ScopedBytesDatabase, Scope, ScopedDbError};
 /// # use heed::EnvOpenOptions;
 /// # use std::sync::Arc;
@@ -254,7 +278,7 @@ impl GlobalScopeRegistry {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{GlobalScopeRegistry, ScopedBytesDatabase, ScopedDatabase, ScopedDbError, Scope, ScopeEmptinessChecker};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;

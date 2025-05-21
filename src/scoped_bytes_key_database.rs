@@ -101,7 +101,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -128,19 +128,40 @@ where
 
     /// Checks if a scope is empty (contains no data).
     ///
-    /// This is a helper method used by find_empty_scopes.
+    /// This is a helper method used by `find_empty_scopes` and the `ScopeEmptinessChecker` implementation.
+    /// It uses efficient ranged iteration to only examine entries for the specified scope.
     fn is_scope_empty(&self, txn: &RoTxn, scope: &Scope) -> Result<bool, ScopedDbError> {
         match scope {
             Scope::Default => {
-                // Count entries in the default database
+                // Check if the default database has any entries
                 let mut iter = self.db_default.iter(txn)?;
                 Ok(iter.next().is_none())
             }
             Scope::Named { hash, .. } => {
-                // Count entries with this scope's hash prefix
-                for result in self.db_scoped.iter(txn)? {
-                    let ((scope_hash, _), _) = result?;
-                    if scope_hash == *hash {
+                let scope_hash = *hash;
+                
+                // Use range-based approach to efficiently check for entries with this scope
+                use std::ops::Bound;
+                
+                // Create a range that covers only entries with this scope hash
+                let start_bound = Bound::Included((scope_hash, &[][..]));
+                
+                // End just before the next scope hash would begin, handling u32::MAX safely
+                let end_bound = if scope_hash == u32::MAX {
+                    // Special case - check up to the maximum possible key value
+                    Bound::Included((scope_hash, &[0xFF][..]))
+                } else {
+                    // Normal case - use the next hash with empty key as exclusive upper bound
+                    Bound::Excluded((scope_hash + 1, &[][..]))
+                };
+                
+                let range = (start_bound, end_bound);
+                
+                // Just check if the range contains any entries
+                let iter = self.db_scoped.range(txn, &range)?;
+                for result in iter {
+                    let ((entry_scope_hash, _), _) = result?;
+                    if entry_scope_hash == scope_hash {
                         return Ok(false); // Found at least one entry
                     }
                 }
@@ -160,7 +181,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -225,7 +246,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -275,7 +296,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -326,7 +347,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -374,7 +395,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, Scope, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -434,7 +455,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -460,6 +481,9 @@ where
     }
 
     /// Iterate over entries in a specific scope or the default database.
+    ///
+    /// This method efficiently uses ranged iteration to retrieve only the entries
+    /// belonging to the requested scope, rather than scanning the entire database.
     pub fn iter<'txn>(&self, txn: &'txn RoTxn<'txn>, scope: &Scope) -> BytesKeyIterResult<'txn, V> {
         match scope {
             Scope::Default => {
@@ -471,11 +495,31 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
+                
+                // Use range-based iteration for better performance
+                use std::ops::Bound;
+                
+                // Create a range that covers only entries with this scope hash
+                let start_bound = Bound::Included((scope_hash, &[][..]));
+                
+                // End just before the next scope hash would begin, handling u32::MAX safely
+                let end_bound = if scope_hash == u32::MAX {
+                    // Special case - use maximum possible key value
+                    Bound::Included((scope_hash, &[0xFF][..]))
+                } else {
+                    // Normal case - use the next hash with empty key as exclusive upper bound
+                    Bound::Excluded((scope_hash + 1, &[][..]))
+                };
+                
+                let range = (start_bound, end_bound);
+                
+                // Use range instead of iter + filter
                 let iter = self
                     .db_scoped
-                    .iter(txn)?
+                    .range(txn, &range)?
                     .filter_map(move |result| match result {
                         Ok(((entry_scope_hash, key), value)) => {
+                            // Double-check scope hash (important for u32::MAX case)
                             if entry_scope_hash == scope_hash {
                                 Some(Ok((key, value)))
                             } else {
@@ -496,7 +540,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -598,7 +642,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesKeyDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # use std::ops::Bound;

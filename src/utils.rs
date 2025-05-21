@@ -30,8 +30,25 @@ impl<'a, R: RangeBounds<&'a [u8]>> RangeBounds<[u8]> for HeedRangeAdapter<'a, R>
     }
 }
 
-/// Specialized codec for byte-based scoped keys to match bincode encoding
-#[doc(hidden)]
+/// Specialized codec for byte-based scoped keys with optimized binary layout.
+///
+/// This codec provides an efficient encoding for scoped keys with the following binary structure:
+/// ```text
+/// [scope_hash_le: 4 bytes][key_len_le: 8 bytes][original_key_data]
+/// ```
+/// where:
+/// - `scope_hash_le`: 32-bit xxHash of the scope name (little-endian)
+/// - `key_len_le`: 64-bit length of the original key (little-endian)
+/// - `original_key_data`: The original key bytes
+///
+/// This format was chosen to:
+/// 1. Be efficiently decodable without full deserialization
+/// 2. Maintain proper lexicographic ordering by scope_hash first, then by key
+/// 3. Allow for efficient ranged operations with partial keys
+/// 4. Support byte slices of any length
+///
+/// The 8-byte key length field matches bincode's encoding for byte slices
+/// and provides sufficient capacity for even very large keys.
 pub enum ScopedBytesCodec {}
 
 impl ScopedBytesCodec {
@@ -95,12 +112,17 @@ impl<'a> BytesDecode<'a> for ScopedBytesCodec {
     }
 }
 
-/// Get a default-constructed K value for creating range bounds
-/// Used by ScopedDatabase.clear to construct minimum viable range bounds
-pub fn get_default_or_clone_first<K>() -> K
+/// Get a default key value for range bound construction.
+///
+/// This function creates a default value of type K for use in range bounds and other
+/// database operations. Currently it just calls K::default(), but is kept as a separate
+/// function to allow for future optimizations or alternate implementations.
+///
+/// It's used in methods like `clear()`, `range()`, and `iter()` to create the minimum 
+/// viable range bounds when working with scoped databases.
+pub fn get_key_default<K>() -> K
 where
     K: Default,
 {
-    // Create a default instance of K
     K::default()
 }

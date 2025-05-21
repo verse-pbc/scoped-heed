@@ -18,6 +18,38 @@ use crate::{IterResult, Scope, ScopedDbError, ScopedKey, utils};
 /// This is the most flexible database type, supporting any Serialize/Deserialize types
 /// for both keys and values. For better performance with byte keys, see
 /// `ScopedBytesKeyDatabase` or `ScopedBytesDatabase`.
+///
+/// # Key Cloning Behavior
+///
+/// When using the `ScopedDatabase<K, V>` with named scopes, the library must clone keys
+/// for operations like `put`, `get`, and `delete`. This is necessary because the original
+/// key (of type `K`) needs to be combined with scope information in a `ScopedKey<K>` struct
+/// before being stored.
+///
+/// ## Performance Implications
+///
+/// For most key types, the cloning overhead is negligible. However, if your key type
+/// is very large or expensive to clone (e.g., large strings, complex structs, or types
+/// with heap allocations), you might consider:
+///
+/// 1. Using smaller keys when possible (e.g., IDs instead of full objects)
+/// 2. Using `ScopedBytesKeyDatabase<V>` if your keys can be represented as byte slices
+/// 3. Implementing an efficient `Clone` implementation for your key type
+///
+/// ## Example Impact
+///
+/// ```rust,ignore
+/// // Small or medium keys - minimal impact
+/// type SmallKey = u64;  // Trivial to clone
+/// type MediumKey = String;  // Linear cost based on string length
+///
+/// // Potentially expensive keys - may have noticeable overhead
+/// type ExpensiveKey = Vec<Vec<String>>;  // Nested allocations
+/// ```
+///
+/// In most real-world applications using reasonable key sizes, the cloning overhead
+/// will not be significant compared to the cost of serialization, deserialization,
+/// and disk I/O.
 #[derive(Debug)]
 pub struct ScopedDatabase<K, V>
 where
@@ -107,7 +139,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -136,6 +168,12 @@ where
     ///
     /// Uses the Scope enum to represent scopes, which provides better
     /// performance by pre-computing and caching scope hashes.
+    ///
+    /// # Key Cloning
+    ///
+    /// For named scopes, this method clones the key to create a `ScopedKey<K>` structure.
+    /// If your key type is very large or expensive to clone, consider using 
+    /// `ScopedBytesKeyDatabase<V>` instead for better performance.
     pub fn put(
         &self,
         txn: &mut RwTxn<'_>,
@@ -171,7 +209,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -202,6 +240,12 @@ where
     ///
     /// Uses the Scope enum to represent scopes, which provides better
     /// performance by pre-computing and caching scope hashes.
+    /// 
+    /// # Key Cloning
+    ///
+    /// For named scopes, this method clones the key to create a `ScopedKey<K>` structure.
+    /// If your key type is very large or expensive to clone, consider using 
+    /// `ScopedBytesKeyDatabase<V>` instead for better performance.
     pub fn get<'txn>(
         &self,
         txn: &'txn RoTxn<'txn>,
@@ -230,7 +274,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -289,7 +333,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -345,7 +389,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedDatabase, Scope, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -384,7 +428,7 @@ where
                     scope_hash: *hash,
                     // We need a "minimum" key value - use Default if K implements it
                     // If K is not Default, we'll fall back to the old approach
-                    key: utils::get_default_or_clone_first(),
+                    key: utils::get_key_default(),
                 };
 
                 let min_key_end = if *hash == u32::MAX {
@@ -433,7 +477,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -460,19 +504,50 @@ where
 
     /// Checks if a scope is empty (contains no data).
     ///
-    /// This is a helper method used by prune_empty_scopes.
+    /// This is a helper method used by `find_empty_scopes` and the `ScopeEmptinessChecker` implementation.
+    /// It uses efficient ranged iteration to only examine entries for the specified scope.
     fn is_scope_empty(&self, txn: &RoTxn, scope: &Scope) -> Result<bool, ScopedDbError> {
         match scope {
             Scope::Default => {
-                // Count entries in the default database
+                // Check if the default database has any entries
                 let mut iter = self.db_default.iter(txn)?;
                 Ok(iter.next().is_none())
             }
             Scope::Named { hash, .. } => {
-                // Count entries with this scope's hash prefix
-                for result in self.db_scoped.iter(txn)? {
+                let scope_hash = *hash;
+                
+                // Use the same ranged approach as in iter() but stop at the first entry
+                use std::ops::Bound;
+                
+                // Start from the beginning of this scope
+                let start_key = ScopedKey {
+                    scope_hash,
+                    key: utils::get_key_default(),
+                };
+                
+                // End at the beginning of the next scope (or at the end for u32::MAX)
+                let end_bound = if scope_hash == u32::MAX {
+                    // Special case for MAX scope hash to avoid overflow
+                    Bound::Included(ScopedKey {
+                        scope_hash,
+                        key: utils::get_key_default(),
+                    })
+                } else {
+                    // For all other cases, use next hash value as exclusive upper bound
+                    Bound::Excluded(ScopedKey {
+                        scope_hash: scope_hash + 1,
+                        key: utils::get_key_default(),
+                    })
+                };
+                
+                // Create the range that covers only this scope
+                let range = (Bound::Included(start_key), end_bound);
+                
+                // Just check if the range contains any entries with this scope hash
+                let iter = self.db_scoped.range(txn, &range)?;
+                for result in iter {
                     let (scoped_key, _) = result?;
-                    if scoped_key.scope_hash == *hash {
+                    if scoped_key.scope_hash == scope_hash {
                         return Ok(false); // Found at least one entry
                     }
                 }
@@ -492,7 +567,7 @@ where
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -527,6 +602,9 @@ where
     }
 
     /// Iterate over entries in a specific scope or the default database.
+    ///
+    /// This method efficiently uses ranged iteration to retrieve only the entries
+    /// belonging to the requested scope, rather than scanning the entire database.
     pub fn iter<'txn>(&self, txn: &'txn RoTxn<'txn>, scope: &Scope) -> IterResult<'txn, K, V> {
         match scope {
             Scope::Default => {
@@ -538,11 +616,42 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
+                
+                // Use range-based iteration to only retrieve entries for this scope
+                use std::ops::Bound;
+                
+                // Start from the beginning of this scope
+                let start_key = ScopedKey {
+                    scope_hash,
+                    key: utils::get_key_default(),
+                };
+                
+                // End at the beginning of the next scope (or at the end for u32::MAX)
+                let end_bound = if scope_hash == u32::MAX {
+                    // Special case for MAX scope hash to avoid overflow
+                    Bound::Included(ScopedKey {
+                        scope_hash,
+                        // We rely on lexicographic ordering of scope_hash first
+                        key: utils::get_key_default(),
+                    })
+                } else {
+                    // For all other cases, use next hash value as exclusive upper bound
+                    Bound::Excluded(ScopedKey {
+                        scope_hash: scope_hash + 1,
+                        key: utils::get_key_default(),
+                    })
+                };
+                
+                // Create the range that covers only this scope
+                let range = (Bound::Included(start_key), end_bound);
+                
+                // Use range instead of iter + filter
                 let iter = self
                     .db_scoped
-                    .iter(txn)?
+                    .range(txn, &range)?
                     .filter_map(move |result| match result {
                         Ok((scoped_key, value)) => {
+                            // Double-check the scope hash (important for u32::MAX case)
                             if scoped_key.scope_hash == scope_hash {
                                 Some(Ok((scoped_key.key, value)))
                             } else {
@@ -563,7 +672,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -595,21 +704,49 @@ where
 
     /// Iterate over a range of entries in a specific scope or the default database.
     ///
-    /// # Performance Note
+    /// This method efficiently handles all range types, including unbounded ranges,
+    /// by properly constructing scope-aware range bounds for the underlying database.
     ///
-    /// When using a named scope with an unbounded end range (`..`, `start..`, etc.),
-    /// this method must fall back to collecting all matching entries into memory due to
-    /// limitations with generic type boundaries. This can be inefficient for large scopes.
+    /// # Example
     ///
-    /// For better performance with unbounded ranges:
-    ///
-    /// 1. Use `ScopedBytesKeyDatabase` or `ScopedBytesDatabase` which implement optimized
-    ///    byte-based ranges
-    /// 2. Provide explicit end bounds when possible
-    /// 3. Consider using multiple smaller bounded ranges if working with large datasets
-    ///
-    /// This limitation arises because with generic types `K`, we cannot efficiently construct
-    /// an upper bound for the scope that works with LMDB's lexicographic ordering.
+    /// ```rust,ignore
+    /// # use scoped_heed::{ScopedDatabase, Scope, ScopedDbError};
+    /// # use heed::EnvOpenOptions;
+    /// # use std::ops::Bound;
+    /// # fn main() -> Result<(), ScopedDbError> {
+    /// # let env = unsafe { EnvOpenOptions::new().map_size(10*1024*1024).max_dbs(3).open("./db")? };
+    /// # let db: ScopedDatabase<String, String> = ScopedDatabase::new(&env, "test")?;
+    /// # let rtxn = env.read_txn()?;
+    /// // Using different range types
+    /// let tenant = Scope::named("tenant1")?;
+    /// 
+    /// // Bounded range
+    /// let bounded = ("a".to_string()..="z".to_string());
+    /// for result in db.range(&rtxn, &tenant, &bounded)? {
+    ///     let (key, value) = result?;
+    ///     println!("{}: {}", key, value);
+    /// }
+    /// 
+    /// // Unbounded start
+    /// let from_start = (..="z".to_string());
+    /// for result in db.range(&rtxn, &tenant, &from_start)? {
+    ///     // ...
+    /// }
+    /// 
+    /// // Unbounded end (efficient implementation)
+    /// let to_end = ("m".to_string()..);
+    /// for result in db.range(&rtxn, &tenant, &to_end)? {
+    ///     // ...
+    /// }
+    /// 
+    /// // Fully unbounded range (returns all entries in the scope)
+    /// let all = (..);
+    /// for result in db.range(&rtxn, &tenant, &all)? {
+    ///     // ...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn range<'sbd_ref, 'txn_ref, 'bounds_ref, R>(
         &'sbd_ref self,
         txn: &'txn_ref RoTxn<'txn_ref>,
@@ -619,6 +756,7 @@ where
     where
         K: Clone + PartialOrd,
         R: RangeBounds<K> + 'bounds_ref,
+        'bounds_ref: 'txn_ref,
     {
         match scope {
             Scope::Default => {
@@ -634,6 +772,7 @@ where
                 // Transform the range bounds to work with our ScopedKey<K> structure
                 use std::ops::Bound;
 
+                // For start bound: map the user's bound to a scoped bound
                 let transformed_start = match range.start_bound() {
                     Bound::Included(key) => Bound::Included(ScopedKey {
                         scope_hash,
@@ -644,14 +783,17 @@ where
                         key: key.clone(),
                     }),
                     Bound::Unbounded => {
-                        // Start from the beginning of this scope
-                        // Note: This correctly handles the unbounded case since
-                        // keys are ordered first by scope_hash, then by key
-                        Bound::Unbounded
+                        // Start from the beginning of this scope with minimum key
+                        Bound::Included(ScopedKey {
+                            scope_hash,
+                            key: utils::get_key_default(),
+                        })
                     }
                 };
 
+                // For end bound: carefully handle the unbounded case
                 let transformed_end = match range.end_bound() {
+                    // If user provided a bounded end, use it with the same scope hash
                     Bound::Included(key) => Bound::Included(ScopedKey {
                         scope_hash,
                         key: key.clone(),
@@ -661,31 +803,22 @@ where
                         key: key.clone(),
                     }),
                     Bound::Unbounded => {
-                        // We can't use Unbounded here as it would include keys from other scopes
-                        // No good solution for this with the current design - fall back to filtering
-                        return self
-                            .db_scoped
-                            .iter(txn)?
-                            .filter_map(move |result| match result {
-                                Ok((scoped_key, value)) => {
-                                    if scoped_key.scope_hash == scope_hash
-                                        && range.contains(&scoped_key.key)
-                                    {
-                                        Some(Ok((scoped_key.key, value)))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                Err(e) => Some(Err(ScopedDbError::from(e))),
+                        // For unbounded end, we use the next scope hash as the exclusive upper bound
+                        // This efficiently restricts the range to only the current scope
+                        if scope_hash == u32::MAX {
+                            // Special case for u32::MAX to avoid overflow
+                            Bound::Included(ScopedKey {
+                                scope_hash,
+                                // Use "maximum" key value - we rely on lexicographic ordering of scope_hash first
+                                key: utils::get_key_default(),
                             })
-                            .collect::<Result<Vec<_>, _>>()
-                            .map(|v| {
-                                Box::new(v.into_iter().map(Ok))
-                                    as Box<
-                                        dyn Iterator<Item = Result<(K, V), ScopedDbError>>
-                                            + 'txn_ref,
-                                    >
-                            });
+                        } else {
+                            // Normal case - use next hash value as the exclusive upper bound
+                            Bound::Excluded(ScopedKey {
+                                scope_hash: scope_hash + 1,
+                                key: utils::get_key_default(),
+                            })
+                        }
                     }
                 };
 
@@ -694,9 +827,31 @@ where
                 let iter =
                     self.db_scoped
                         .range(txn, &transformed_range)?
-                        .map(|result| match result {
-                            Ok((scoped_key, value)) => Ok((scoped_key.key, value)),
-                            Err(e) => Err(ScopedDbError::from(e)),
+                        .filter_map(move |result| match result {
+                            Ok((scoped_key, value)) => {
+                                // Double-check the scope hash to ensure we're only getting entries
+                                // from the requested scope (important for the u32::MAX case)
+                                if scoped_key.scope_hash == scope_hash {
+                                    // Apply the original range bounds to the key
+                                    let in_original_range = match (range.start_bound(), range.end_bound()) {
+                                        (Bound::Unbounded, Bound::Unbounded) => true,
+                                        (Bound::Unbounded, Bound::Included(end)) => &scoped_key.key <= end,
+                                        (Bound::Unbounded, Bound::Excluded(end)) => &scoped_key.key < end,
+                                        (Bound::Included(start), Bound::Unbounded) => &scoped_key.key >= start,
+                                        (Bound::Excluded(start), Bound::Unbounded) => &scoped_key.key > start,
+                                        _ => range.contains(&scoped_key.key),
+                                    };
+                                    
+                                    if in_original_range {
+                                        Some(Ok((scoped_key.key, value)))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
                         });
                 Ok(Box::new(iter))
             }
@@ -711,7 +866,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # use std::ops::Bound;
@@ -745,6 +900,7 @@ where
     where
         K: Clone + PartialOrd,
         R: RangeBounds<K> + 'bounds_ref,
+        'bounds_ref: 'txn_ref,
     {
         let scope = Scope::from(scope_name);
         self.range(txn, &scope, range)

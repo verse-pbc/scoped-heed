@@ -18,6 +18,40 @@ use twox_hash::XxHash32;
 ///    standard Rust hasher
 /// 3. Operations like `get`, `put`, and `delete` no longer need to acquire a
 ///    write lock on the `ScopeHasher` for every operation
+///
+/// # Hash Collisions
+/// 
+/// This library uses a 32-bit hash (via xxHash32) for identifying scopes, which
+/// provides a good balance between performance, storage efficiency, and collision resistance.
+/// 
+/// ## Collision Probability
+/// 
+/// With a 32-bit hash space (4 billion possible values):
+/// - With 1,000 scopes: Collision probability is very low (about 0.0001%)
+/// - With 10,000 scopes: Collision probability is roughly 0.01%
+/// - With 100,000 scopes: Collision probability is approximately 1%
+/// 
+/// ## Collision Handling
+/// 
+/// The library's `GlobalScopeRegistry` takes an important safety precaution: it 
+/// detects hash collisions between different scope names and immediately returns
+/// an error if a collision is found, preventing any potential data corruption.
+/// 
+/// For example, if by rare chance "scope1" and "scope2" both generate the same hash value,
+/// the system will detect this during the first attempt to use the second scope and
+/// return a `ScopedDbError::InvalidInput` error with a clear message identifying the
+/// collision.
+/// 
+/// ## Recommended Practice
+/// 
+/// To minimize collision risks:
+/// 1. Keep the total number of unique scopes below 10,000 if possible
+/// 2. Use descriptive but focused scope names (avoid excessively long names)
+/// 3. Use a consistent naming scheme for scopes
+/// 
+/// When a hash collision occurs, you'll need to adjust one of the colliding scope names.
+/// This is a rare occurrence but important to understand if you're working with
+/// a very large number of scopes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     /// The default (unscoped) database

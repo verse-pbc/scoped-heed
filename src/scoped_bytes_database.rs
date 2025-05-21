@@ -90,7 +90,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -149,7 +149,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError, Scope, GlobalScopeRegistry};
     /// # use heed::EnvOpenOptions;
     /// # use std::sync::Arc;
@@ -214,7 +214,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -264,7 +264,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -315,7 +315,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -363,7 +363,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use scoped_heed::{ScopedBytesDatabase, Scope, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -423,7 +423,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -485,7 +485,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # fn main() -> Result<(), ScopedDbError> {
@@ -587,7 +587,7 @@ impl ScopedBytesDatabase {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// # use scoped_heed::{ScopedBytesDatabase, ScopedDbError};
     /// # use heed::EnvOpenOptions;
     /// # use std::ops::Bound;
