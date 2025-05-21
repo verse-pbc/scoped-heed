@@ -52,7 +52,7 @@ use twox_hash::XxHash32;
 /// When a hash collision occurs, you'll need to adjust one of the colliding scope names.
 /// This is a rare occurrence but important to understand if you're working with
 /// a very large number of scopes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Scope {
     /// The default (unscoped) database
     Default,
