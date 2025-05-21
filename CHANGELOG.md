@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0-alpha.1] - 2025-05-20
+## [0.2.0-alpha.1] - 2024-05-20
 
 ### Added
 - Added `GlobalScopeRegistry` for centralized scope metadata management
@@ -24,12 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING**: All database types now require a `GlobalScopeRegistry` for scope operations
 - Improved documentation for clear() methods explaining optimized implementations
 
-## [0.1.1] - 2025-05-19
+## [0.1.1] - 2024-05-19
 
 ### Changed
 - Pinned heed dependency to version 0.20.5 for stability and compatibility with dependent projects
 
-## [0.1.0] - 2025-01-19
+## [0.1.0] - 2024-01-19
 
 ### Added
 - Initial release of scoped-heed

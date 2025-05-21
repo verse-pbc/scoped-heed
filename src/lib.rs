@@ -19,21 +19,27 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use scoped_heed::{scoped_database_options, ScopedDbError, Scope};
+//! use scoped_heed::{scoped_database_options, ScopedDbError, Scope, GlobalScopeRegistry}; // Added GlobalScopeRegistry
 //! use heed::EnvOpenOptions;
+//! use std::sync::Arc; // Added Arc
 //!
 //! # fn main() -> Result<(), ScopedDbError> {
 //! // Open environment
 //! let env = unsafe {
 //!     EnvOpenOptions::new()
 //!         .map_size(10 * 1024 * 1024)
-//!         .max_dbs(3)
+//!         .max_dbs(5) // Increased max_dbs for registry + example dbs
 //!         .open("./my_db")?
 //! };
 //!
+//! // Create global registry
+//! let mut txn = env.write_txn()?;
+//! let registry = Arc::new(GlobalScopeRegistry::new(&env, &mut txn)?);
+//! txn.commit()?;
+//!
 //! // Create a scoped database
 //! let mut wtxn = env.write_txn()?;
-//! let db = scoped_database_options(&env)
+//! let db = scoped_database_options(&env, registry.clone()) // Pass registry here
 //!     .types::<String, String>()
 //!     .name("my_data")
 //!     .create(&mut wtxn)?;
