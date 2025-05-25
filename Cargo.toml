@@ -1,6 +1,6 @@
 [package]
 name = "scoped-heed"
-version = "0.2.0-alpha.3"
+version = "0.2.0-alpha.4"
 edition = "2024"
 description = "Redis-like database isolation for LMDB via heed - provides completely isolated scopes within a single environment"
 license = "MIT OR Apache-2.0"
