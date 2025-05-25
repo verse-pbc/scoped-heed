@@ -43,7 +43,8 @@ impl ScopedBytesDatabase {
         registry: Arc<GlobalScopeRegistry>,
     ) -> Result<Self, ScopedDbError> {
         // Create database names from base name
-        let default_name = format!("{}_default", name);
+        // Use the original name for default database (backward compatibility)
+        let default_name = name.to_string();
         let scoped_name = format!("{}_scoped", name);
 
         let db_default = env
