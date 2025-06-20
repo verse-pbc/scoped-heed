@@ -140,13 +140,13 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
-                
+
                 // Use range-based approach to efficiently check for entries with this scope
                 use std::ops::Bound;
-                
+
                 // Create a range that covers only entries with this scope hash
                 let start_bound = Bound::Included((scope_hash, &[][..]));
-                
+
                 // End just before the next scope hash would begin, handling u32::MAX safely
                 let end_bound = if scope_hash == u32::MAX {
                     // Special case - check up to the maximum possible key value
@@ -155,9 +155,9 @@ where
                     // Normal case - use the next hash with empty key as exclusive upper bound
                     Bound::Excluded((scope_hash + 1, &[][..]))
                 };
-                
+
                 let range = (start_bound, end_bound);
-                
+
                 // Just check if the range contains any entries
                 let iter = self.db_scoped.range(txn, &range)?;
                 for result in iter {
@@ -496,13 +496,13 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
-                
+
                 // Use range-based iteration for better performance
                 use std::ops::Bound;
-                
+
                 // Create a range that covers only entries with this scope hash
                 let start_bound = Bound::Included((scope_hash, &[][..]));
-                
+
                 // End just before the next scope hash would begin, handling u32::MAX safely
                 let end_bound = if scope_hash == u32::MAX {
                     // Special case - use maximum possible key value
@@ -511,24 +511,24 @@ where
                     // Normal case - use the next hash with empty key as exclusive upper bound
                     Bound::Excluded((scope_hash + 1, &[][..]))
                 };
-                
+
                 let range = (start_bound, end_bound);
-                
+
                 // Use range instead of iter + filter
-                let iter = self
-                    .db_scoped
-                    .range(txn, &range)?
-                    .filter_map(move |result| match result {
-                        Ok(((entry_scope_hash, key), value)) => {
-                            // Double-check scope hash (important for u32::MAX case)
-                            if entry_scope_hash == scope_hash {
-                                Some(Ok((key, value)))
-                            } else {
-                                None
+                let iter =
+                    self.db_scoped
+                        .range(txn, &range)?
+                        .filter_map(move |result| match result {
+                            Ok(((entry_scope_hash, key), value)) => {
+                                // Double-check scope hash (important for u32::MAX case)
+                                if entry_scope_hash == scope_hash {
+                                    Some(Ok((key, value)))
+                                } else {
+                                    None
+                                }
                             }
-                        }
-                        Err(e) => Some(Err(ScopedDbError::from(e))),
-                    });
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
+                        });
                 Ok(Box::new(iter))
             }
         }

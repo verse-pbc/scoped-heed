@@ -77,7 +77,7 @@
 //! ## Key Encoding
 //!
 //! Scoped entries use different key encoding strategies depending on the database type:
-//! 
+//!
 //! ### Generic Database (`ScopedDatabase<K,V>`)
 //! - Default scope: keys are stored using the `K` codec directly
 //! - Named scopes: Keys are stored as a serialized `ScopedKey<K>` struct containing:
@@ -99,7 +99,7 @@
 //!   - `key_len_le`: 64-bit length of the original key (little-endian)
 //!   - `original_key_data`: The original key bytes
 //!   
-//! This specialized binary format in the byte databases provides substantial performance 
+//! This specialized binary format in the byte databases provides substantial performance
 //! improvements over the generic encoding, particularly for key decoding operations.
 
 use serde::{Deserialize, Serialize};

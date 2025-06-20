@@ -118,7 +118,7 @@ impl<'a> BytesDecode<'a> for ScopedBytesCodec {
 /// database operations. Currently it just calls K::default(), but is kept as a separate
 /// function to allow for future optimizations or alternate implementations.
 ///
-/// It's used in methods like `clear()`, `range()`, and `iter()` to create the minimum 
+/// It's used in methods like `clear()`, `range()`, and `iter()` to create the minimum
 /// viable range bounds when working with scoped databases.
 pub fn get_key_default<K>() -> K
 where

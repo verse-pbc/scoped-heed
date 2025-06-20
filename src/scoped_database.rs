@@ -173,7 +173,7 @@ where
     /// # Key Cloning
     ///
     /// For named scopes, this method clones the key to create a `ScopedKey<K>` structure.
-    /// If your key type is very large or expensive to clone, consider using 
+    /// If your key type is very large or expensive to clone, consider using
     /// `ScopedBytesKeyDatabase<V>` instead for better performance.
     pub fn put(
         &self,
@@ -241,11 +241,11 @@ where
     ///
     /// Uses the Scope enum to represent scopes, which provides better
     /// performance by pre-computing and caching scope hashes.
-    /// 
+    ///
     /// # Key Cloning
     ///
     /// For named scopes, this method clones the key to create a `ScopedKey<K>` structure.
-    /// If your key type is very large or expensive to clone, consider using 
+    /// If your key type is very large or expensive to clone, consider using
     /// `ScopedBytesKeyDatabase<V>` instead for better performance.
     pub fn get<'txn>(
         &self,
@@ -516,16 +516,16 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
-                
+
                 // Use the same ranged approach as in iter() but stop at the first entry
                 use std::ops::Bound;
-                
+
                 // Start from the beginning of this scope
                 let start_key = ScopedKey {
                     scope_hash,
                     key: utils::get_key_default(),
                 };
-                
+
                 // End at the beginning of the next scope (or at the end for u32::MAX)
                 let end_bound = if scope_hash == u32::MAX {
                     // Special case for MAX scope hash to avoid overflow
@@ -540,10 +540,10 @@ where
                         key: utils::get_key_default(),
                     })
                 };
-                
+
                 // Create the range that covers only this scope
                 let range = (Bound::Included(start_key), end_bound);
-                
+
                 // Just check if the range contains any entries with this scope hash
                 let iter = self.db_scoped.range(txn, &range)?;
                 for result in iter {
@@ -617,16 +617,16 @@ where
             }
             Scope::Named { hash, .. } => {
                 let scope_hash = *hash;
-                
+
                 // Use range-based iteration to only retrieve entries for this scope
                 use std::ops::Bound;
-                
+
                 // Start from the beginning of this scope
                 let start_key = ScopedKey {
                     scope_hash,
                     key: utils::get_key_default(),
                 };
-                
+
                 // End at the beginning of the next scope (or at the end for u32::MAX)
                 let end_bound = if scope_hash == u32::MAX {
                     // Special case for MAX scope hash to avoid overflow
@@ -642,25 +642,25 @@ where
                         key: utils::get_key_default(),
                     })
                 };
-                
+
                 // Create the range that covers only this scope
                 let range = (Bound::Included(start_key), end_bound);
-                
+
                 // Use range instead of iter + filter
-                let iter = self
-                    .db_scoped
-                    .range(txn, &range)?
-                    .filter_map(move |result| match result {
-                        Ok((scoped_key, value)) => {
-                            // Double-check the scope hash (important for u32::MAX case)
-                            if scoped_key.scope_hash == scope_hash {
-                                Some(Ok((scoped_key.key, value)))
-                            } else {
-                                None
+                let iter =
+                    self.db_scoped
+                        .range(txn, &range)?
+                        .filter_map(move |result| match result {
+                            Ok((scoped_key, value)) => {
+                                // Double-check the scope hash (important for u32::MAX case)
+                                if scoped_key.scope_hash == scope_hash {
+                                    Some(Ok((scoped_key.key, value)))
+                                } else {
+                                    None
+                                }
                             }
-                        }
-                        Err(e) => Some(Err(ScopedDbError::from(e))),
-                    });
+                            Err(e) => Some(Err(ScopedDbError::from(e))),
+                        });
                 Ok(Box::new(iter))
             }
         }
@@ -720,26 +720,26 @@ where
     /// # let rtxn = env.read_txn()?;
     /// // Using different range types
     /// let tenant = Scope::named("tenant1")?;
-    /// 
+    ///
     /// // Bounded range
     /// let bounded = ("a".to_string()..="z".to_string());
     /// for result in db.range(&rtxn, &tenant, &bounded)? {
     ///     let (key, value) = result?;
     ///     println!("{}: {}", key, value);
     /// }
-    /// 
+    ///
     /// // Unbounded start
     /// let from_start = (..="z".to_string());
     /// for result in db.range(&rtxn, &tenant, &from_start)? {
     ///     // ...
     /// }
-    /// 
+    ///
     /// // Unbounded end (efficient implementation)
     /// let to_end = ("m".to_string()..);
     /// for result in db.range(&rtxn, &tenant, &to_end)? {
     ///     // ...
     /// }
-    /// 
+    ///
     /// // Fully unbounded range (returns all entries in the scope)
     /// let all = (..);
     /// for result in db.range(&rtxn, &tenant, &all)? {
@@ -834,15 +834,24 @@ where
                                 // from the requested scope (important for the u32::MAX case)
                                 if scoped_key.scope_hash == scope_hash {
                                     // Apply the original range bounds to the key
-                                    let in_original_range = match (range.start_bound(), range.end_bound()) {
-                                        (Bound::Unbounded, Bound::Unbounded) => true,
-                                        (Bound::Unbounded, Bound::Included(end)) => &scoped_key.key <= end,
-                                        (Bound::Unbounded, Bound::Excluded(end)) => &scoped_key.key < end,
-                                        (Bound::Included(start), Bound::Unbounded) => &scoped_key.key >= start,
-                                        (Bound::Excluded(start), Bound::Unbounded) => &scoped_key.key > start,
-                                        _ => range.contains(&scoped_key.key),
-                                    };
-                                    
+                                    let in_original_range =
+                                        match (range.start_bound(), range.end_bound()) {
+                                            (Bound::Unbounded, Bound::Unbounded) => true,
+                                            (Bound::Unbounded, Bound::Included(end)) => {
+                                                &scoped_key.key <= end
+                                            }
+                                            (Bound::Unbounded, Bound::Excluded(end)) => {
+                                                &scoped_key.key < end
+                                            }
+                                            (Bound::Included(start), Bound::Unbounded) => {
+                                                &scoped_key.key >= start
+                                            }
+                                            (Bound::Excluded(start), Bound::Unbounded) => {
+                                                &scoped_key.key > start
+                                            }
+                                            _ => range.contains(&scoped_key.key),
+                                        };
+
                                     if in_original_range {
                                         Some(Ok((scoped_key.key, value)))
                                     } else {
