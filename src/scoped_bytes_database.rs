@@ -19,39 +19,30 @@ pub struct ScopedBytesDatabase {
 }
 
 impl ScopedBytesDatabase {
-    /// Creates a new ScopedBytesDatabase with a global registry.
-    ///
-    /// This method requires a global registry for scope metadata management.
-    pub fn new(
-        env: &Env,
-        name: &str,
-        registry: Arc<GlobalScopeRegistry>,
-    ) -> Result<Self, ScopedDbError> {
-        let mut wtxn = env.write_txn()?;
-        let db = Self::create(env, name, &mut wtxn, registry)?;
-        wtxn.commit()?;
-        Ok(db)
-    }
-
     /// Create a new ScopedBytesDatabase with a provided transaction
     ///
     /// Requires a global registry for scope metadata management.
-    pub fn create(
+    /// This method is intended to be called through the builder pattern.
+    pub(crate) fn create(
         env: &Env,
         name: &str,
         txn: &mut RwTxn,
         registry: Arc<GlobalScopeRegistry>,
+        use_unnamed_for_default: bool,
     ) -> Result<Self, ScopedDbError> {
         // Create database names from base name
-        // Use the original name for default database (backward compatibility)
-        let default_name = name.to_string();
         let scoped_name = format!("{}_scoped", name);
 
-        let db_default = env
-            .database_options()
-            .types::<Bytes, Bytes>()
-            .name(&default_name)
-            .create(txn)?;
+        let db_default = if use_unnamed_for_default {
+            // Use unnamed database for default scope (backward compatibility)
+            env.database_options().types::<Bytes, Bytes>().create(txn)?
+        } else {
+            // Use named database for default scope
+            env.database_options()
+                .types::<Bytes, Bytes>()
+                .name(name)
+                .create(txn)?
+        };
 
         let db_scoped = env
             .database_options()

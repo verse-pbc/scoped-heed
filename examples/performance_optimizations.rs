@@ -1,5 +1,5 @@
 use heed::EnvOpenOptions;
-use scoped_heed::{GlobalScopeRegistry, Scope, ScopedBytesDatabase, scoped_database_options};
+use scoped_heed::{GlobalScopeRegistry, Scope, scoped_database_options};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,7 +46,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(&mut wtxn)?;
     wtxn.commit()?;
 
-    let bytes_raw_db = ScopedBytesDatabase::new(&env, "raw_bytes", registry.clone())?;
+    let mut wtxn = env.write_txn()?;
+    let bytes_raw_db = scoped_database_options(&env, registry.clone())
+        .raw_bytes()
+        .name("raw_bytes")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
 
     let tenant_a = Scope::named("tenant_a")?;
     let tenant_b = Scope::named("tenant_b")?;

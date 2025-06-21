@@ -1,5 +1,5 @@
 use heed::EnvOpenOptions;
-use scoped_heed::{GlobalScopeRegistry, Scope, ScopedDatabase};
+use scoped_heed::{GlobalScopeRegistry, Scope, scoped_database_options};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -23,9 +23,13 @@ fn test_cloned_db_shares_global_registry() {
     };
 
     // 2. Create the original database instance with the global registry
-    let db_original =
-        ScopedDatabase::<String, String>::new(&env, "test_shared_scope", global_registry.clone())
-            .unwrap();
+    let mut wtxn = env.write_txn().unwrap();
+    let db_original = scoped_database_options(&env, global_registry.clone())
+        .types::<String, String>()
+        .name("test_shared_scope")
+        .create(&mut wtxn)
+        .unwrap();
+    wtxn.commit().unwrap();
 
     // 3. Use a scope with the original database
     let scope1_name = "my_shared_scope";

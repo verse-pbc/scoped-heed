@@ -28,24 +28,11 @@ impl<V> ScopedBytesKeyDatabase<V>
 where
     V: Serialize + for<'de> Deserialize<'de> + 'static,
 {
-    /// Creates a new ScopedBytesKeyDatabase with a global registry.
-    ///
-    /// This method requires a global registry for scope metadata management.
-    pub fn new(
-        env: &Env,
-        name: &str,
-        registry: Arc<GlobalScopeRegistry>,
-    ) -> Result<Self, ScopedDbError> {
-        let mut wtxn = env.write_txn()?;
-        let db = Self::create(env, name, &mut wtxn, registry)?;
-        wtxn.commit()?;
-        Ok(db)
-    }
-
     /// Create a new ScopedBytesKeyDatabase with a provided transaction
     ///
     /// Requires a global registry for scope metadata management.
-    pub fn create(
+    /// This method is intended to be called through the builder pattern.
+    pub(crate) fn create(
         env: &Env,
         name: &str,
         txn: &mut RwTxn,

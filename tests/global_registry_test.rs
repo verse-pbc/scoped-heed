@@ -1,8 +1,5 @@
 use heed::EnvOpenOptions;
-use scoped_heed::{
-    GlobalScopeRegistry, Scope, ScopedBytesDatabase, ScopedBytesKeyDatabase, ScopedDatabase,
-    ScopedDbError,
-};
+use scoped_heed::{GlobalScopeRegistry, Scope, ScopedDbError, scoped_database_options};
 use std::sync::Arc;
 
 // Helper function to create a test environment
@@ -33,8 +30,16 @@ fn test_global_registry_basic() -> Result<(), ScopedDbError> {
     let scope2 = Scope::named("tenant2")?;
 
     // Create databases with the shared registry
-    let db_users = ScopedDatabase::<String, String>::new(&env, "users", registry.clone())?;
-    let db_posts = ScopedBytesKeyDatabase::<String>::new(&env, "posts", registry.clone())?;
+    let mut wtxn = env.write_txn()?;
+    let db_users = scoped_database_options(&env, registry.clone())
+        .types::<String, String>()
+        .name("users")
+        .create(&mut wtxn)?;
+    let db_posts = scoped_database_options(&env, registry.clone())
+        .bytes_keys::<String>()
+        .name("posts")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
 
     // Add data to scopes
     let mut wtxn = env.write_txn()?;
@@ -100,9 +105,22 @@ fn test_multiple_databases_sharing_registry() -> Result<(), ScopedDbError> {
     wtxn.commit()?;
 
     // Create three different database types with the shared registry
-    let db1 = ScopedDatabase::<String, String>::new(&env, "db1", registry.clone())?;
-    let db2 = ScopedBytesKeyDatabase::<String>::new(&env, "db2", registry.clone())?;
-    let db3 = ScopedBytesDatabase::new(&env, "db3", registry.clone())?;
+    let mut wtxn = env.write_txn()?;
+    let db1 = scoped_database_options(&env, registry.clone())
+        .types::<String, String>()
+        .name("db1")
+        .create(&mut wtxn)?;
+    let db2 = scoped_database_options(&env, registry.clone())
+        .bytes_keys::<String>()
+        .name("db2")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
+    let mut wtxn = env.write_txn()?;
+    let db3 = scoped_database_options(&env, registry.clone())
+        .raw_bytes()
+        .name("db3")
+        .create(&mut wtxn)?;
+    wtxn.commit()?;
 
     // Create some test data across databases for the same scope
     let tenant = Scope::named("shared_tenant")?;

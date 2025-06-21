@@ -63,6 +63,7 @@ impl<'env> ScopedDatabaseOptions<'env> {
             env: self.env,
             name: None,
             global_registry: self.global_registry,
+            use_unnamed_for_default: false,
         }
     }
 }
@@ -135,12 +136,21 @@ pub struct RawBytesOptions<'env> {
     env: &'env Env,
     name: Option<String>,
     global_registry: Arc<GlobalScopeRegistry>,
+    use_unnamed_for_default: bool,
 }
 
 impl RawBytesOptions<'_> {
     /// Set the database name
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
+        self
+    }
+
+    /// Use unnamed database for default scope instead of a named database
+    /// This is useful for backward compatibility with existing LMDB databases
+    /// that store data in the unnamed database
+    pub fn unnamed_for_default(mut self) -> Self {
+        self.use_unnamed_for_default = true;
         self
     }
 
@@ -155,6 +165,7 @@ impl RawBytesOptions<'_> {
             &name,
             txn,
             self.global_registry.clone(),
+            self.use_unnamed_for_default,
         )
     }
 }
